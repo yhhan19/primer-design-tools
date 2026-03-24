@@ -1,0 +1,39 @@
+CXX      := g++
+PRIMER3  ?= ./primer3
+
+CXXFLAGS := -O3 -std=c++17 -I$(PRIMER3)/src -pthread \
+            -DPRIMER3_PATH=\"$(PRIMER3)\"
+
+LDFLAGS  := -L$(PRIMER3)/src
+LDLIBS   := -lthal -lm
+
+BIN_DIR   := bin
+BUILD_DIR := build
+SRC_DIR   := src
+
+TARGET := $(BIN_DIR)/dpro
+
+SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+
+all: $(TARGET)
+
+# Link
+$(TARGET): $(OBJS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+# Compile
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Ensure directories exist
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+clean:
+	rm -rf $(BIN_DIR) $(BUILD_DIR)
+
+.PHONY: all clean
