@@ -1,0 +1,336 @@
+#include "automaton.hpp"
+
+AutomatonNode::AutomatonNode() {
+    for (std::size_t i = 0; i < ALPHABET; i ++) 
+        children[i] = NULL;
+    parent = NULL;
+    prev = NULL;
+}
+
+AutomatonNode::~AutomatonNode() {
+    for (auto node : children) {
+        if (node != NULL) 
+            delete node;
+    }
+}
+
+Automaton::Automaton(const std::vector<std::string> &labels, 
+                     const std::vector<std::string> &seqs, 
+                     std::size_t kmer_len) : k(kmer_len) {
+    std::vector<std::string> data;
+    for (std::size_t i = 0; i < labels.size(); i ++) {
+        const std::string &forward = seqs[i], &reverse = revcomp(seqs[i]);
+        for (std::size_t j = 0; j + k <= forward.size(); j ++) {
+            data.push_back(forward.substr(j, k));
+            index2label.push_back(labels[i]);
+            index2data.push_back(forward);
+            index2pos.push_back(j);
+            index2strand.push_back(i * 2);
+        }
+        for (std::size_t j = 0; j + k <= reverse.size(); j ++) {
+            data.push_back(reverse.substr(j, k));
+            index2label.push_back(labels[i]);
+            index2data.push_back(reverse);
+            index2pos.push_back(j);
+            index2strand.push_back(i * 2 + 1);
+        }
+        label2index[labels[i]] = i;
+    }
+
+    root = new AutomatonNode();
+    for (std::size_t i = 0; i < data.size(); i ++) {
+        AutomatonNode *current = root;
+        for (std::size_t j = 0; j < data[i].size(); j ++) {
+            if (current->children[data[i][j]] == NULL) {
+                AutomatonNode *next = new AutomatonNode();
+                current->children[data[i][j]] = next;
+                next->parent = current;
+                next->ch = data[i][j];
+            }
+            current = current->children[data[i][j]];
+        }
+        current->index.push_back(i);
+    }
+
+    std::vector<AutomatonNode *> queue;
+    std::size_t head = 0;
+    for (std::size_t i = 0; i < ALPHABET; i ++) {
+        if (root->children[i] != NULL) {
+            queue.push_back(root->children[i]);
+            root->children[i]->prev = root;
+        }
+    }
+
+    while (head < queue.size()) {
+        AutomatonNode *current = queue[head];
+        for (std::size_t i = 0; i < ALPHABET; i ++) {
+            if (current->children[i] != NULL) {
+                AutomatonNode *temp = current->prev;
+                while (temp != root && temp->children[i] == NULL)
+                    temp = temp->prev;
+                if (temp->children[i] != NULL) 
+                    current->children[i]->prev = temp->children[i];
+                else 
+                    current->children[i]->prev = root;
+                queue.push_back(current->children[i]);
+            }
+        }
+        head ++;
+    }
+}
+
+Automaton::~Automaton() {
+    delete root;
+}
+
+std::vector<Result> Automaton::search(const std::string &path, 
+                                      std::size_t overlap, 
+                                      std::size_t threshold,
+                                      double dg_thres,
+                                      std::size_t chunk_size, 
+                                      std::size_t io_block_size, 
+                                      std::size_t nthreads) {
+    return process_fasta_chunks(path, 
+                                overlap,
+                                threshold,
+                                dg_thres,
+                                chunk_size,
+                                io_block_size,
+                                nthreads);
+}
+
+std::size_t Automaton::search_chunk(const std::string& contig,
+                                    const char* data,
+                                    std::size_t len,
+                                    std::size_t index,
+                                    std::size_t threshold,
+                                    double dg_thres,
+                                    std::vector<Result> &local_results) {
+    std::cout << contig << "\t"
+              << index + len - this->k + 1
+              << "\n";
+
+    std::size_t count = 0;
+    AutomatonNode *current = root;
+    std::unordered_set<CandidateKey, CandidateKeyHash> active;
+    std::deque<ActiveEntry> q;
+
+    for (std::size_t i = 0, j = index; i < len; i ++, j ++) {
+        while (!q.empty() && q.front().expire_at < i) {
+            active.erase(q.front().key);
+            q.pop_front();
+        }
+
+        while (current != root && current->children[data[i]] == NULL) 
+            current = current->prev;
+        if (current->children[data[i]] != NULL) {
+            current = current->children[data[i]];
+        }
+
+        for (std::size_t k = 0; k < current->index.size(); k ++) {
+            std::size_t seq_id = current->index[k], pos = index2pos[seq_id];
+            std::string seq = index2data[seq_id], seq_ = seq;
+            if (this->k + pos > i + 1) continue;
+
+            std::size_t start = i + 1 - this->k - pos;
+            if (start + seq.size() > len) continue;
+
+            CandidateKey key{index2strand[seq_id], start};
+            if (active.find(key) != active.end()) continue;
+            active.insert(key);
+            q.push_back(ActiveEntry{key, start + seq.size() - 1});
+
+            std::size_t mismatch[2] = {0, 0};
+            std::size_t i_, j_;
+            for (i_ = 0, j_ = start; i_ < seq.size() - 1; i_ ++, j_ ++) {
+                if (data[j_] != seq[i_]) {
+                    ++ mismatch[0];
+                    ++ mismatch[1];
+                    seq_[i_] = data[j_];
+                }
+                else if (data[j_ + 1] != seq[i_ + 1]) {
+                    ++ mismatch[1];
+                }
+            }
+            if (data[j_] != seq[i_]) {
+                ++ mismatch[0];
+                seq_[i_] = data[j_];
+            }
+            if (mismatch[threshold % 2] > threshold / 2) continue;
+
+            double dg = Thal::compute_dimer_dg(seq, seq_);
+            if (dg < dg_thres) {
+                local_results.emplace_back(
+                    Result{
+                        index2label[seq_id],
+                        seq,
+                        contig,
+                        seq_,
+                        i + 1 - this->k - pos,
+                        index2strand[seq_id] % 2,
+                        dg
+                    }
+                );
+            }
+            count ++;
+        }
+    }
+    return count;
+}
+
+std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
+                                                    std::size_t overlap,
+                                                    std::size_t threshold,
+                                                    double dg_thres,
+                                                    std::size_t chunk_size,
+                                                    std::size_t io_block_size,
+                                                    std::size_t nthreads) {
+    
+    TaskQueue q(std::max<std::size_t>(2, nthreads * 2));
+
+    std::vector<std::thread> workers;
+    workers.reserve(nthreads);
+
+    std::vector<std::vector<Result>> buckets(nthreads);
+    std::vector<std::size_t> counts(nthreads);
+
+    for (std::size_t t = 0; t < nthreads; ++t) {
+        workers.emplace_back([this, 
+                              &q, 
+                              &local_results = buckets[t], 
+                              &local_counts = counts[t],
+                              &threshold, 
+                              &dg_thres]() {
+            Task x;
+            while (q.pop(x)) {
+                local_counts += this->search_chunk(
+                    x.contig, 
+                    x.seq.data(), 
+                    x.seq.size(), 
+                    x.start, 
+                    threshold,
+                    dg_thres,
+                    local_results
+                );
+            }
+        });
+    }
+
+    std::thread prod([&, this]() {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            std::cerr << "Cannot open file\n";
+            q.close();
+            return;
+        }
+
+        std::cout << "Starting search:\n"
+                  << "Contig\tChunk (ending position)\n";
+
+        std::vector<char> io(io_block_size);
+
+        std::string contig;
+        std::string seq_buf;
+        seq_buf.reserve(chunk_size + overlap);
+
+        bool in_header = false;
+        bool have_contig = false;
+        std::string header_acc;
+
+        std::size_t last_index = 0;
+
+        auto flush_buf_as_last = [&]() {
+            if (have_contig && !seq_buf.empty()) {
+                q.push(Task{contig, seq_buf, last_index, true});
+                seq_buf.clear();
+            }
+        };
+
+        while (in) {
+            in.read(io.data(), io.size());
+            std::streamsize n = in.gcount();
+            if (n <= 0) break;
+
+            for (std::streamsize i = 0; i < n; i++) {
+                char c = io[i];
+
+                // Reading header
+                if (in_header) {
+                    if (c == '\n' || c == '\r') {
+                        // Finish header
+                        size_t pos = header_acc.find_first_of(" \t");
+                        contig = (pos != std::string::npos) ? 
+                            header_acc.substr(0, pos) : 
+                            header_acc;
+
+                        header_acc.clear();
+                        in_header = false;
+                        have_contig = true;
+
+                        seq_buf.clear();
+                        last_index = 0;
+                    } 
+                    else {
+                        header_acc.push_back(c);
+                    }
+                    continue;
+                }
+
+                // New header starts
+                if (c == '>') {
+                    // flush previous contig
+                    flush_buf_as_last();
+
+                    header_acc.clear();
+                    in_header = true;
+                    have_contig = false;
+                    continue;
+                }
+
+                if (!have_contig) continue;
+                if (is_ws(c)) continue;
+
+                c = std::toupper(static_cast<unsigned char>(c));
+                seq_buf.push_back(c);
+
+                // emit chunk when we have chunk_size + overlap in buffer
+                if (seq_buf.size() >= chunk_size + overlap) {
+                    // Create task chunk = seq_buf[0 : chunk_size+overlap)
+                    std::string chunk(seq_buf.data(), chunk_size + overlap);
+                    q.push(Task{contig, std::move(chunk), last_index, false});
+
+                    // Keep overlap suffix
+                    if (overlap > 0) {
+                        seq_buf.erase(0, chunk_size);  // leaves overlap bytes
+                        last_index += chunk_size;      // advance by chunk_size
+                    } 
+                    else {
+                        seq_buf.clear();
+                        last_index += chunk_size;      // still advance
+                    }
+                }
+            }
+        }
+
+        // flush last contig
+        flush_buf_as_last();
+        q.close();
+    });
+
+    prod.join();
+    for (auto& th : workers) th.join();
+
+    std::size_t total = 0;
+    for (auto& count : counts) 
+        total += count;
+    std::cout << "\n"
+              << "Candidate size   : " << total << "\n";
+
+    std::vector<Result> results;
+    for (auto& b : buckets) {
+        results.insert(results.end(),
+                    std::make_move_iterator(b.begin()),
+                    std::make_move_iterator(b.end()));
+    }
+    return results;
+}
