@@ -1,6 +1,32 @@
 #include "risk_optimizer.hpp"
 
-RiskOptimizer::RiskOptimizer(std::vector<risk_t> input, index_t len, index_t min, index_t max) {
+RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels, 
+                             std::vector<std::string> &data,
+                             index_t len,
+                             index_t min,
+                             index_t max) {
+    std::vector<risk_t> input = compute_risk(data);
+    size = input.size();
+    risk = new risk_t[size];
+    prefix_sum = new risk_t[size + 1];
+    prefix_sum[0] = 0;
+    for (index_t i = 0; i < input.size(); i ++) {
+        risk[i] = input[i];
+        prefix_sum[i + 1] = prefix_sum[i] + risk[i];
+    }
+    this->len = len;
+    this->min = min;
+    this->max = max;
+    memo = new risk_t[KEY_LIMIT];
+    prev = new key_t[KEY_LIMIT];
+    solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
+    solutions = new BST*[size];
+}
+
+RiskOptimizer::RiskOptimizer(std::vector<risk_t> input, 
+                             index_t len, 
+                             index_t min, 
+                             index_t max) {
     size = input.size();
     risk = new risk_t[size];
     prefix_sum = new risk_t[size + 1];

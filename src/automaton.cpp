@@ -1,7 +1,7 @@
 #include "automaton.hpp"
 
 AutomatonNode::AutomatonNode() {
-    for (std::size_t i = 0; i < ALPHABET; i ++) 
+    for (std::size_t i = 0; i < ALPHABET_SIZE; i ++) 
         children[i] = NULL;
     parent = NULL;
     prev = NULL;
@@ -54,7 +54,7 @@ Automaton::Automaton(const std::vector<std::string> &labels,
 
     std::vector<AutomatonNode *> queue;
     std::size_t head = 0;
-    for (std::size_t i = 0; i < ALPHABET; i ++) {
+    for (std::size_t i = 0; i < ALPHABET_SIZE; i ++) {
         if (root->children[i] != NULL) {
             queue.push_back(root->children[i]);
             root->children[i]->prev = root;
@@ -63,7 +63,7 @@ Automaton::Automaton(const std::vector<std::string> &labels,
 
     while (head < queue.size()) {
         AutomatonNode *current = queue[head];
-        for (std::size_t i = 0; i < ALPHABET; i ++) {
+        for (std::size_t i = 0; i < ALPHABET_SIZE; i ++) {
             if (current->children[i] != NULL) {
                 AutomatonNode *temp = current->prev;
                 while (temp != root && temp->children[i] == NULL)

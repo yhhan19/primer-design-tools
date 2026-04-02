@@ -4,8 +4,19 @@ PRIMER3  ?= ./primer3
 CXXFLAGS := -O3 -std=c++17 -I$(PRIMER3)/src -pthread \
             -DPRIMER3_PATH=\"$(PRIMER3)\"
 
-LDFLAGS  := -L$(PRIMER3)/src
-LDLIBS   := -lthal -lm
+P3_OBJS := \
+    $(PRIMER3)/src/libprimer3.o    \
+    $(PRIMER3)/src/thal_primer.o   \
+    $(PRIMER3)/src/dpal_primer.o   \
+    $(PRIMER3)/src/oligotm.o       \
+    $(PRIMER3)/src/p3_seq_lib.o    \
+    $(PRIMER3)/src/read_boulder.o  \
+    $(PRIMER3)/src/print_boulder.o \
+    $(PRIMER3)/src/format_output.o \
+    $(PRIMER3)/src/masker.o        \
+    $(PRIMER3)/src/amplicontm.o
+
+LDLIBS := -lm
 
 BIN_DIR   := bin
 BUILD_DIR := build
@@ -18,15 +29,12 @@ OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 
 all: $(TARGET)
 
-# Link
 $(TARGET): $(OBJS) | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) $^ $(P3_OBJS) -o $@ $(LDLIBS)
 
-# Compile
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Ensure directories exist
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 

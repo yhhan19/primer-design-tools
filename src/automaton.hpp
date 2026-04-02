@@ -32,7 +32,7 @@ public:
 private:
     friend class Automaton;
 
-    AutomatonNode *children[ALPHABET], *prev, *parent;
+    AutomatonNode *children[ALPHABET_SIZE], *prev, *parent;
     std::vector<std::size_t> index;
     std::size_t ch;
 };

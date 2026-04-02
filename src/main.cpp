@@ -2,38 +2,7 @@
 #include "automaton.hpp"
 #include "risk_optimizer.hpp"
 #include "graph.hpp"
-
-struct Args {
-    std::string mode;
-
-    std::string input_file;
-    std::string output_file;
-    std::string ref_file;
-
-    std::size_t seed = 42;
-    std::size_t len_amp = 420;
-    std::size_t len_amp_min = 252;
-    std::size_t len_PDR = 40;
-    double u_max = 10000;
-    double u_min = 0.1;
-
-    std::size_t iter = 1000;
-
-    std::size_t kmer_len = 8;
-    std::size_t threshold = 2;
-    std::size_t nthreads = 8;
-    std::size_t block_size = 1 << 27;
-    std::size_t chunk_size = (std::size_t) 1e8;
-    
-    double dg_thres = 1e8;
-    double mv = 50.0;
-    double dv = 1.5;
-    double dntp = 0.6;
-    double dna_conc = 200.0;
-    double temp = 37.0;
-
-    bool help = false;
-};
+#include "pipeline.hpp"
 
 static void print_usage(const char* prog) {
     std::cerr
@@ -274,16 +243,126 @@ static Args parse_args(int argc, char** argv) {
     return a;
 }
 
+void test_primer3() {
+    // --- 1. Global settings (primer constraints) ---
+    p3_global_settings *pa = p3_create_global_settings();
+    p3_set_gs_primer_opt_size(pa, 20);
+    p3_set_gs_primer_min_size(pa, 18);
+    p3_set_gs_primer_max_size(pa, 25);
+    p3_set_gs_primer_opt_tm(pa, 60.0);
+    p3_set_gs_primer_min_tm(pa, 57.0);
+    p3_set_gs_primer_max_tm(pa, 63.0);
+    p3_set_gs_primer_min_gc(pa, 40.0);
+    p3_set_gs_primer_max_gc(pa, 60.0);
+
+    pa->p_args.salt_conc     = 50.0;
+    pa->p_args.divalent_conc = 1.5;
+    pa->p_args.dntp_conc     = 0.6;
+    pa->p_args.dna_conc      = 50.0;
+
+    // Product size range: 100–300 bp
+    pa->pr_min[0] = 100;
+    pa->pr_max[0] = 300;
+    pa->num_intervals = 1;
+
+    // Pick left + right primers (standard PCR pair)
+    pa->pick_left_primer  = 1;
+    pa->pick_right_primer = 1;
+    pa->pick_internal_oligo = 0;
+
+    // --- 2. Sequence arguments ---
+    seq_args *sa = create_seq_arg();
+
+    const char *tmpl = "GCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCC"
+                       "TACATTTTAGCATCAGTGAGTACAGCATGCTTACTGG"
+                       "AAGAGAGGGTCATGCAACAGATTAGGAGGTAAGTTTG"
+                       "CAAAGGCAGGCTAAGGAGGAGACGCACTGAATGCCAT"
+                       "GGTAAGAACTCTGGACATAAAAATATTGGAAGTTGTTG";
+
+    sa->sequence = strdup(tmpl);
+    sa->sequence_name = strdup("my_template");
+
+    // Included region: start=0, length=full sequence
+    sa->incl_s = 0;
+    sa->incl_l = strlen(tmpl);
+
+    // Number of primer pairs to return
+    pa->num_return = 5;
+
+    // --- 3. Run primer design ---
+    p3retval *retval = choose_primers(pa, sa);
+
+    if (retval == nullptr) {
+        std::cerr << "choose_primers() returned NULL\n";
+        return ;
+    }
+
+    // Check for errors
+    if (retval->glob_err.data) {
+        std::cerr << "Global error: " << retval->glob_err.data << "\n";
+    }
+    if (retval->per_sequence_err.data) {
+        std::cerr << "Sequence error: " << retval->per_sequence_err.data << "\n";
+    }
+
+    // --- 4. Extract results ---
+    int n_pairs = retval->best_pairs.num_pairs;
+    std::cout << "Found " << n_pairs << " primer pair(s)\n\n";
+
+    for (int i = 0; i < n_pairs; i++) {
+        primer_pair *pp = &retval->best_pairs.pairs[i];
+        primer_rec  *left  = pp->left;
+        primer_rec  *right = pp->right;
+
+        // Extract left primer sequence from template
+        char left_seq[64] = {0};
+        strncpy(left_seq, sa->sequence + left->start, left->length);
+
+        // Right primer is on reverse complement — extract raw coords
+        char right_seq[64] = {0};
+        // right->start is the 3' end position; length goes leftward
+        int right_start = right->start - right->length + 1;
+        strncpy(right_seq, sa->sequence + right_start, right->length);
+
+        std::cout << "Pair " << i + 1 << ":\n"
+                  << "  Left:  " << left_seq
+                  << "  (pos=" << left->start
+                  << " len=" << left->length
+                  << " Tm=" << left->temp << ")\n"
+                  << "  Right: " << right_seq
+                  << "  (pos=" << right->start
+                  << " len=" << right->length
+                  << " Tm=" << right->temp << ")\n"
+                  << "  Product size: " << pp->product_size << "\n\n";
+    }
+
+    // --- 5. Cleanup ---
+    destroy_p3retval(retval);
+    destroy_seq_args(sa);
+    p3_destroy_global_settings(pa);
+}
+
 int main(int argc, char** argv) {
     try {
+        PipelineContext ctx;
+
+        ctx.args = parse_args(argc, argv);
         
-        Args args = parse_args(argc, argv);
-        
-        if (args.help) {
+        if (ctx.args.help) {
             print_usage(argv[0]);
             return 0;
         }
+
+        read_fasta(ctx.args.input_file, ctx.labels, ctx.sequences);
         
+        Pipeline p;
+        p.add(std::make_unique<PDRStage>());
+        p.add(std::make_unique<PrimerSelStage>());
+        p.add(std::make_unique<DimerStage>());
+        p.add(std::make_unique<OffTargetStage>());
+        p.run(ctx);
+        
+        /*
         if (args.mode == "pdr") {
             std::cout << "Running PDR optimizer\n";
             srand(args.seed);
@@ -339,6 +418,7 @@ int main(int argc, char** argv) {
             
             write_results(args.output_file, results, labels);
         }
+        */
         
         return 0;
     } catch (const std::exception& e) {
