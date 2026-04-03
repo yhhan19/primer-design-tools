@@ -243,105 +243,6 @@ static Args parse_args(int argc, char** argv) {
     return a;
 }
 
-void test_primer3() {
-    // --- 1. Global settings (primer constraints) ---
-    p3_global_settings *pa = p3_create_global_settings();
-    p3_set_gs_primer_opt_size(pa, 20);
-    p3_set_gs_primer_min_size(pa, 18);
-    p3_set_gs_primer_max_size(pa, 25);
-    p3_set_gs_primer_opt_tm(pa, 60.0);
-    p3_set_gs_primer_min_tm(pa, 57.0);
-    p3_set_gs_primer_max_tm(pa, 63.0);
-    p3_set_gs_primer_min_gc(pa, 40.0);
-    p3_set_gs_primer_max_gc(pa, 60.0);
-
-    pa->p_args.salt_conc     = 50.0;
-    pa->p_args.divalent_conc = 1.5;
-    pa->p_args.dntp_conc     = 0.6;
-    pa->p_args.dna_conc      = 50.0;
-
-    // Product size range: 100–300 bp
-    pa->pr_min[0] = 100;
-    pa->pr_max[0] = 300;
-    pa->num_intervals = 1;
-
-    // Pick left + right primers (standard PCR pair)
-    pa->pick_left_primer  = 1;
-    pa->pick_right_primer = 1;
-    pa->pick_internal_oligo = 0;
-
-    // --- 2. Sequence arguments ---
-    seq_args *sa = create_seq_arg();
-
-    const char *tmpl = "GCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCC"
-                       "TACATTTTAGCATCAGTGAGTACAGCATGCTTACTGG"
-                       "AAGAGAGGGTCATGCAACAGATTAGGAGGTAAGTTTG"
-                       "CAAAGGCAGGCTAAGGAGGAGACGCACTGAATGCCAT"
-                       "GGTAAGAACTCTGGACATAAAAATATTGGAAGTTGTTG";
-
-    sa->sequence = strdup(tmpl);
-    sa->sequence_name = strdup("my_template");
-
-    // Included region: start=0, length=full sequence
-    sa->incl_s = 0;
-    sa->incl_l = strlen(tmpl);
-
-    // Number of primer pairs to return
-    pa->num_return = 5;
-
-    // --- 3. Run primer design ---
-    p3retval *retval = choose_primers(pa, sa);
-
-    if (retval == nullptr) {
-        std::cerr << "choose_primers() returned NULL\n";
-        return ;
-    }
-
-    // Check for errors
-    if (retval->glob_err.data) {
-        std::cerr << "Global error: " << retval->glob_err.data << "\n";
-    }
-    if (retval->per_sequence_err.data) {
-        std::cerr << "Sequence error: " << retval->per_sequence_err.data << "\n";
-    }
-
-    // --- 4. Extract results ---
-    int n_pairs = retval->best_pairs.num_pairs;
-    std::cout << "Found " << n_pairs << " primer pair(s)\n\n";
-
-    for (int i = 0; i < n_pairs; i++) {
-        primer_pair *pp = &retval->best_pairs.pairs[i];
-        primer_rec  *left  = pp->left;
-        primer_rec  *right = pp->right;
-
-        // Extract left primer sequence from template
-        char left_seq[64] = {0};
-        strncpy(left_seq, sa->sequence + left->start, left->length);
-
-        // Right primer is on reverse complement — extract raw coords
-        char right_seq[64] = {0};
-        // right->start is the 3' end position; length goes leftward
-        int right_start = right->start - right->length + 1;
-        strncpy(right_seq, sa->sequence + right_start, right->length);
-
-        std::cout << "Pair " << i + 1 << ":\n"
-                  << "  Left:  " << left_seq
-                  << "  (pos=" << left->start
-                  << " len=" << left->length
-                  << " Tm=" << left->temp << ")\n"
-                  << "  Right: " << right_seq
-                  << "  (pos=" << right->start
-                  << " len=" << right->length
-                  << " Tm=" << right->temp << ")\n"
-                  << "  Product size: " << pp->product_size << "\n\n";
-    }
-
-    // --- 5. Cleanup ---
-    destroy_p3retval(retval);
-    destroy_seq_args(sa);
-    p3_destroy_global_settings(pa);
-}
-
 int main(int argc, char** argv) {
     try {
         PipelineContext ctx;
@@ -354,6 +255,7 @@ int main(int argc, char** argv) {
         }
 
         read_fasta(ctx.args.input_file, ctx.labels, ctx.sequences);
+        ctx.tmpl = msa_consensus(ctx.sequences);
         
         Pipeline p;
         p.add(std::make_unique<PDRStage>());
@@ -362,63 +264,8 @@ int main(int argc, char** argv) {
         p.add(std::make_unique<OffTargetStage>());
         p.run(ctx);
         
-        /*
-        if (args.mode == "pdr") {
-            std::cout << "Running PDR optimizer\n";
-            srand(args.seed);
-            std::string ref;
-            std::vector<risk_t> rate;
-            if (read_rate_ref(args.input_file, rate, ref) != 0) return 1;
-
-            RiskOptimizer ro(rate, 
-                             args.len_PDR, 
-                             args.len_amp, 
-                             args.len_amp);
-            auto PDR = ro.search(0, args.u_max, args.u_min);
-            ro.validate_PDR(PDR);
-            risk_t score = ro.score(PDR, ALPHA);
-            std::cout << "loss: " << score << std::endl;
-
-            std::ofstream fout(args.output_file);
-            fout << display_PDR(PDR) << std::endl;
-        }
-        else if (args.mode == "dimer") {
-            std::cout << "Running dimer optimization\n";
-            srand(args.seed);
-            KPartiteGraph g(args.input_file);
-            auto solution = g.solve_fast(args.iter);
-            std::cout << "loss: " << g.cost(solution) << std::endl;
-
-            std::ofstream fout(args.output_file);
-            for (index_t i : solution)
-                fout << i << " ";
-            fout << "\n";
-        }
-        else if (args.mode == "off") {
-            std::cout << "Running off-target search\n";
-            Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 
-                    args.mv, 
-                    args.dv, 
-                    args.dntp, 
-                    args.dna_conc, 
-                    args.temp);
-
-            std::vector<std::string> labels, data;
-            read_fasta(args.input_file, labels, data);
-
-            Automaton *ac = new Automaton(labels, data, args.kmer_len);
-            auto results = ac->search(args.ref_file, 
-                    args.kmer_len - 1, 
-                    args.threshold,
-                    args.dg_thres,
-                    args.chunk_size, 
-                    args.block_size, 
-                    args.nthreads);
-            delete ac;
-            
-            write_results(args.output_file, results, labels);
-        }
-        */
+        for (auto out : ctx.candidate_primers) 
+            display_primer_output(out);
         
         return 0;
     } catch (const std::exception& e) {

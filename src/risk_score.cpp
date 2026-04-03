@@ -331,7 +331,7 @@ std::vector<risk_t> RiskOptimizer::compute_risk(const std::vector<std::string>& 
     
     RiskWeights weights;
     
-    std::cout << "Computing comprehensive risk scores for " << length << " positions..." << std::endl;
+    std::cout << "Computing scores for " << length << " positions..." << std::endl;
     
     for (size_t pos = 0; pos < length; ++pos) {
         if (pos % 1000 == 0) {
@@ -403,6 +403,6 @@ std::vector<risk_t> RiskOptimizer::compute_risk(const std::vector<std::string>& 
         risk_scores[pos] = std::min(total_risk, 1.0);
     }
     
-    std::cout << "Risk computation completed!" << std::endl;
+    std::cout << "Score computation completed!\n\n";
     return risk_scores;
 }

@@ -1,6 +1,4 @@
-#ifndef __BST__
-#define __BST__
-
+#pragma once
 #include "utility.hpp"
 
 class BSTNode {
@@ -28,5 +26,3 @@ class BST {
         std::pair<index_t, risk_t> range_query(BSTNode *root, index_t lower, index_t upper);
  
 };
-
-#endif

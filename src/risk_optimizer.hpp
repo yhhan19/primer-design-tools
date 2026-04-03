@@ -42,18 +42,18 @@ class RiskOptimizer {
         // Main comprehensive risk computation function
         std::vector<risk_t> compute_risk(const std::vector<std::string>& sequences);
         
-        // Risk weights structure (can be moved to private section or as a nested struct)
+        // Risk weights structure
         struct RiskWeights {
-            double diversity = 0.25;
-            double gaps = 0.20;
-            double ambiguity = 0.15;
-            double entropy = 0.15;
-            double conservation = 0.10;
-            double gc_deviation = 0.05;
-            double complexity = 0.05;
-            double indels = 0.05;
-            double tm_stability = 0.05;
-            double secondary_structure = 0.05;
+            double diversity = 0.5;
+            double gaps = 0.0;
+            double ambiguity = 0.0;
+            double entropy = 0.0;
+            double conservation = 0.0;
+            double gc_deviation = 0.0;
+            double complexity = 0.5;
+            double indels = 0.0;
+            double tm_stability = 0.0;
+            double secondary_structure = 0.0;
         };
 
         std::unordered_map<key_t, risk_t> memo_umap;
@@ -64,10 +64,13 @@ class RiskOptimizer {
         key_t *prev;
         index_t size, len, min, max;
         risk_t *risk, *prefix_sum;
+        std::size_t *gc;
         std::vector<index_t> random_PDR();
         index_t greedy_random_between(index_t cmin, index_t cmax);
         risk_t opt(index_t f, index_t r, index_t pf, index_t pr, risk_t u, risk_t alpha);
         risk_t cost(index_t p, risk_t u, risk_t alpha);
+        std::size_t gc_count(index_t p);
+        bool gc_valid(index_t p);
         risk_t top_k_opt(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t opt_m(index_t f, index_t r, risk_t u, risk_t alpha);

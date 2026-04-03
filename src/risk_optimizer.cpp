@@ -6,13 +6,17 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
                              index_t min,
                              index_t max) {
     std::vector<risk_t> input = compute_risk(data);
+    std::string tmpl = msa_consensus(data);
     size = input.size();
     risk = new risk_t[size];
     prefix_sum = new risk_t[size + 1];
     prefix_sum[0] = 0;
+    gc = new std::size_t[size + 1];
+    gc[0] = 0;
     for (index_t i = 0; i < input.size(); i ++) {
         risk[i] = input[i];
         prefix_sum[i + 1] = prefix_sum[i] + risk[i];
+        gc[i + 1] = gc[i] + (is_gc(tmpl[i]) ? 1 : 0);
     }
     this->len = len;
     this->min = min;
@@ -49,6 +53,17 @@ risk_t RiskOptimizer::cost(index_t p, risk_t u, risk_t alpha) {
     risk_t sum2 = sum * sum - u;
     if (sum2 < 0) return u * alpha;
     return sum2 + u * alpha;
+}
+
+std::size_t RiskOptimizer::gc_count(index_t p) {
+    std::size_t count = gc[p + len] - gc[p];
+    return count;
+}
+
+bool RiskOptimizer::gc_valid(index_t p) {
+    std::size_t count = gc_count(p);
+    double r = (double) count / len;
+    return r >= 0.4 && r <= 0.6;
 }
 
 RiskOptimizer::~RiskOptimizer() {
@@ -140,6 +155,10 @@ index_t RiskOptimizer::greedy_random_between(index_t cmin, index_t cmax) {
 
 void RiskOptimizer::validate_PDR(std::vector<index_t> PDR) {
     for (index_t i = 0; i < PDR.size(); i ++) {
+        if (! gc_valid(PDR[i])) {
+            std::cout << i << " " << PDR[i] << "\n";
+        }
+        assert(gc_valid(PDR[i]));
         if (i % 2 == 0) {
             if (i == 0) {
                 continue;
@@ -262,6 +281,7 @@ risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, ri
             if (r_ < max) continue;
             index_t f_ = r_ - max;
             if (r < r_ + len || r_ < f + len || f < f_ + len) continue;
+            if (! gc_valid(r) || ! gc_valid(r_) || ! gc_valid(f) || ! gc_valid(f_)) continue;
             key_t k = to_key_2(r, r_);
             risk_t min_risk;
             key_t min_key;
@@ -435,6 +455,7 @@ risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk
 }
 
 std::vector<index_t> RiskOptimizer::search(risk_t lower, risk_t upper, risk_t eps) {
+    std::cout << "Search for optimal PDR ...\n";
     std::cout << std::setw(8) << "i" << std::setw(12) << "u'" << std::setw(12) << "loss'" << std::setw(12) << "loss" << std::endl;
     max -= len; min -= len;
     std::vector<index_t> min_PDR, final_PDR, temp_PDR;
@@ -454,5 +475,6 @@ std::vector<index_t> RiskOptimizer::search(risk_t lower, risk_t upper, risk_t ep
         std::cout << std::setw(8) << i << std::setw(12) << u << std::setw(12) << temp << std::setw(12) << score(min_PDR, alpha) << std::endl;
     }
     max += len; min += len;
+    std::cout << "Search completed!\n\n";
     return final_PDR;
 }
