@@ -256,17 +256,14 @@ int main(int argc, char** argv) {
 
         read_fasta(ctx.args.input_file, ctx.labels, ctx.sequences);
         ctx.tmpl = msa_consensus(ctx.sequences);
-        
+
         Pipeline p;
         p.add(std::make_unique<PDRStage>());
         p.add(std::make_unique<PrimerSelStage>());
-        p.add(std::make_unique<DimerStage>());
         p.add(std::make_unique<OffTargetStage>());
+        p.add(std::make_unique<DimerStage>());
         p.run(ctx);
-        
-        for (auto out : ctx.candidate_primers) 
-            display_primer_output(out);
-        
+
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n\n";

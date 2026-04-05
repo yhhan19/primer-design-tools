@@ -255,105 +255,6 @@ std::string display_PDR(std::vector<index_t> PDR) {
     return PDRs;
 }
 
-void test_primer3() {
-    // --- 1. Global settings (primer constraints) ---
-    p3_global_settings *pa = p3_create_global_settings();
-    p3_set_gs_primer_opt_size(pa, 20);
-    p3_set_gs_primer_min_size(pa, 18);
-    p3_set_gs_primer_max_size(pa, 25);
-    p3_set_gs_primer_opt_tm(pa, 60.0);
-    p3_set_gs_primer_min_tm(pa, 57.0);
-    p3_set_gs_primer_max_tm(pa, 63.0);
-    p3_set_gs_primer_min_gc(pa, 40.0);
-    p3_set_gs_primer_max_gc(pa, 60.0);
-
-    pa->p_args.salt_conc     = 50.0;
-    pa->p_args.divalent_conc = 1.5;
-    pa->p_args.dntp_conc     = 0.6;
-    pa->p_args.dna_conc      = 50.0;
-
-    // Product size range: 100–300 bp
-    pa->pr_min[0] = 100;
-    pa->pr_max[0] = 300;
-    pa->num_intervals = 1;
-
-    // Pick left + right primers (standard PCR pair)
-    pa->pick_left_primer  = 1;
-    pa->pick_right_primer = 1;
-    pa->pick_internal_oligo = 0;
-
-    // --- 2. Sequence arguments ---
-    seq_args *sa = create_seq_arg();
-
-    const char *tmpl = "GCTTGCATGCCTGCAGGTCGACTCTAGAGGATCCCCC"
-                       "TACATTTTAGCATCAGTGAGTACAGCATGCTTACTGG"
-                       "AAGAGAGGGTCATGCAACAGATTAGGAGGTAAGTTTG"
-                       "CAAAGGCAGGCTAAGGAGGAGACGCACTGAATGCCAT"
-                       "GGTAAGAACTCTGGACATAAAAATATTGGAAGTTGTTG";
-
-    sa->sequence = strdup(tmpl);
-    sa->sequence_name = strdup("my_template");
-
-    // Included region: start=0, length=full sequence
-    sa->incl_s = 0;
-    sa->incl_l = strlen(tmpl);
-
-    // Number of primer pairs to return
-    pa->num_return = 5;
-
-    // --- 3. Run primer design ---
-    p3retval *retval = choose_primers(pa, sa);
-
-    if (retval == nullptr) {
-        std::cerr << "choose_primers() returned NULL\n";
-        return ;
-    }
-
-    // Check for errors
-    if (retval->glob_err.data) {
-        std::cerr << "Global error: " << retval->glob_err.data << "\n";
-    }
-    if (retval->per_sequence_err.data) {
-        std::cerr << "Sequence error: " << retval->per_sequence_err.data << "\n";
-    }
-
-    // --- 4. Extract results ---
-    int n_pairs = retval->best_pairs.num_pairs;
-    std::cout << "Found " << n_pairs << " primer pair(s)\n\n";
-
-    for (int i = 0; i < n_pairs; i++) {
-        primer_pair *pp = &retval->best_pairs.pairs[i];
-        primer_rec  *left  = pp->left;
-        primer_rec  *right = pp->right;
-
-        // Extract left primer sequence from template
-        char left_seq[64] = {0};
-        strncpy(left_seq, sa->sequence + left->start, left->length);
-
-        // Right primer is on reverse complement — extract raw coords
-        char right_seq[64] = {0};
-        // right->start is the 3' end position; length goes leftward
-        int right_start = right->start - right->length + 1;
-        strncpy(right_seq, sa->sequence + right_start, right->length);
-
-        std::cout << "Pair " << i + 1 << ":\n"
-                  << "  Left:  " << left_seq
-                  << "  (pos=" << left->start
-                  << " len=" << left->length
-                  << " Tm=" << left->temp << ")\n"
-                  << "  Right: " << right_seq
-                  << "  (pos=" << right->start
-                  << " len=" << right->length
-                  << " Tm=" << right->temp << ")\n"
-                  << "  Product size: " << pp->product_size << "\n\n";
-    }
-
-    // --- 5. Cleanup ---
-    destroy_p3retval(retval);
-    destroy_seq_args(sa);
-    p3_destroy_global_settings(pa);
-}
-
 std::string msa_consensus(const std::vector<std::string>& msa) {
     char gap = '-';
     if (msa.empty()) return {};
@@ -440,4 +341,421 @@ void display_primer_output(const PrimerOutput& out) {
         std::cout << "[" << i << "]";
         print_oligo(out.right_oligos[i], "");
     }
+}
+
+void convert(const std::vector<PrimerOutput>& primer_outputs,
+                       std::vector<std::string>& labels,
+                       std::vector<std::string>& sequences) {
+
+    labels.clear();
+    sequences.clear();
+    
+    for (size_t i = 0; i < primer_outputs.size(); ++i) {
+        const auto& output = primer_outputs[i];
+        
+        // Extract primer pairs
+        for (size_t j = 0; j < output.pairs.size(); ++j) {
+            // Forward primer
+            labels.push_back("OUT" + std::to_string(i) + "_P" + std::to_string(j) + "_F");
+            sequences.push_back(output.pairs[j].left.seq);
+            
+            // Reverse primer
+            labels.push_back("OUT" + std::to_string(i) + "_P" + std::to_string(j) + "_R");
+            sequences.push_back(output.pairs[j].right.seq);
+        }
+
+        // Extract standalone left oligos
+        for (size_t j = 0; j < output.left_oligos.size(); ++j) {
+            labels.push_back("OUT" + std::to_string(i) + "_L" + std::to_string(j));
+            sequences.push_back(output.left_oligos[j].seq);
+        }
+        
+        // Extract standalone right oligos
+        for (size_t j = 0; j < output.right_oligos.size(); ++j) {
+            labels.push_back("OUT" + std::to_string(i) + "_R" + std::to_string(j));
+            sequences.push_back(output.right_oligos[j].seq);
+        }
+    }
+}
+
+Oligo extract_oligo(const primer_rec& p,
+                    const char* sequence,
+                    bool is_right) {
+    Oligo o;
+    o.length = p.length;
+    o.tm     = p.temp;
+    o.gc     = p.gc_content;
+    o.start  = is_right ? p.start - p.length + 1 : p.start;
+    o.seq    = std::string(sequence + o.start, p.length);
+    return o;
+}
+
+PrimerOutput extract_all(const p3retval* retval,
+                         const seq_args*  sa) {
+    PrimerOutput out;
+
+    out.pairs.reserve(retval->best_pairs.num_pairs);
+    for (int i = 0; i < retval->best_pairs.num_pairs; i++) {
+        const primer_pair& pp = retval->best_pairs.pairs[i];
+        PrimerResult r;
+        r.left         = extract_oligo(*pp.left,  sa->sequence, false);
+        r.right        = extract_oligo(*pp.right, sa->sequence, true);
+        r.product_size = pp.product_size;
+        out.pairs.push_back(r);
+    }
+
+    out.left_oligos.reserve(retval->fwd.num_elem);
+    for (int i = 0; i < retval->fwd.num_elem; i++)
+        out.left_oligos.push_back(
+            extract_oligo(retval->fwd.oligo[i], sa->sequence, false));
+
+    out.right_oligos.reserve(retval->rev.num_elem);
+    for (int i = 0; i < retval->rev.num_elem; i++)
+        out.right_oligos.push_back(
+            extract_oligo(retval->rev.oligo[i], sa->sequence, true));
+
+    return out;
+}
+
+std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
+                                     double dg_threshold,
+                                     const std::vector<PrimerOutput>& original_primers) {
+    
+    // Group results by output index - these are primers to REMOVE
+    std::unordered_map<int, std::vector<const Result*>> results_by_output;
+    
+    std::cout << "=== DG-BASED PRIMER REMOVAL ===" << std::endl;
+    std::cout << "dG threshold: " << dg_threshold << std::endl;
+    
+    size_t total_to_remove = 0;
+    for (const auto& result : results) {
+        if (result.dg <= dg_threshold) {  // These meet criteria for REMOVAL
+            total_to_remove++;
+            if (result.label.length() >= 3 && result.label.substr(0, 3) == "OUT") {
+                size_t pos = result.label.find('_');
+                if (pos != std::string::npos) {
+                    try {
+                        int output_idx = std::stoi(result.label.substr(3, pos - 3));
+                        if (output_idx >= 0 && output_idx < static_cast<int>(original_primers.size())) {
+                            results_by_output[output_idx].push_back(&result);
+                        }
+                    } catch (...) {
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    
+    std::cout << "Total primers to remove: " << total_to_remove << "/" << results.size() 
+              << " (dG <= " << dg_threshold << ")" << std::endl;
+    
+    std::vector<PrimerOutput> filtered_outputs(original_primers.size());
+    
+    // Collect and deduplicate removed primers
+    if (total_to_remove > 0) {
+        // Track the worst (lowest) dG for each unique primer
+        std::map<std::tuple<int, std::string, int>, const Result*> worst_pairs;      // output, type(P), index -> result
+        std::map<std::tuple<int, std::string, int>, const Result*> worst_standalone; // output, type(L/R), index -> result
+        
+        for (const auto& [output_idx, output_results] : results_by_output) {
+            for (const auto* result : output_results) {
+                const std::string& label = result->label;
+                
+                // Parse and categorize
+                if (label.find("_P") != std::string::npos) {
+                    // Pair primers
+                    size_t p_pos = label.find("_P");
+                    size_t f_pos = label.find("_F");
+                    size_t r_pos = label.find("_R");
+                    
+                    if (p_pos != std::string::npos && (f_pos != std::string::npos || r_pos != std::string::npos)) {
+                        try {
+                            std::string idx_str = label.substr(p_pos + 2, 
+                                (f_pos != std::string::npos ? f_pos : r_pos) - p_pos - 2);
+                            int pair_idx = std::stoi(idx_str);
+                            std::string direction = (f_pos != std::string::npos) ? "F" : "R";
+                            
+                            auto key = std::make_tuple(output_idx, "P" + std::to_string(pair_idx) + "_" + direction, pair_idx);
+                            
+                            // Keep the one with lowest (most negative) dG
+                            if (!worst_pairs.count(key) || result->dg < worst_pairs[key]->dg) {
+                                worst_pairs[key] = result;
+                            }
+                        } catch (...) {}
+                    }
+                }
+                else if (label.find("_L") != std::string::npos || label.find("_R") != std::string::npos) {
+                    // Standalone primers
+                    char type = (label.find("_L") != std::string::npos) ? 'L' : 'R';
+                    size_t type_pos = label.find(std::string("_") + type);
+                    
+                    try {
+                        std::string idx_str = label.substr(type_pos + 2);
+                        int idx = std::stoi(idx_str);
+                        
+                        auto key = std::make_tuple(output_idx, std::string(1, type), idx);
+                        
+                        // Keep the one with lowest (most negative) dG
+                        if (!worst_standalone.count(key) || result->dg < worst_standalone[key]->dg) {
+                            worst_standalone[key] = result;
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+        
+        // TABLE A1: Filtered Primer Pairs
+        if (!worst_pairs.empty()) {
+            std::cout << "\nFiltered Primer Pairs" << std::endl;
+            std::cout << std::string(73, '-') << std::endl;
+            std::cout << std::setw(8) << "PDR pair"
+                      << std::setw(8) << "Index"
+                      << std::setw(10) << "Direction"
+                      << std::setw(12) << "dG"
+                      << std::setw(35) << "Sequence"
+                      << std::endl;
+            std::cout << std::string(73, '-') << std::endl;
+            
+            // Sort by output, then index, then direction
+            std::vector<std::pair<std::tuple<int, std::string, int>, const Result*>> sorted_pairs(
+                worst_pairs.begin(), worst_pairs.end());
+            
+            std::sort(sorted_pairs.begin(), sorted_pairs.end(), 
+                [](const auto& a, const auto& b) {
+                    if (std::get<0>(a.first) != std::get<0>(b.first)) 
+                        return std::get<0>(a.first) < std::get<0>(b.first);
+                    if (std::get<2>(a.first) != std::get<2>(b.first))
+                        return std::get<2>(a.first) < std::get<2>(b.first);
+                    return std::get<1>(a.first) < std::get<1>(b.first);
+                });
+            
+            for (const auto& [key, result] : sorted_pairs) {
+                int output_idx = std::get<0>(key);
+                int pair_idx = std::get<2>(key);
+                std::string type_dir = std::get<1>(key);
+                
+                std::string direction = type_dir.substr(type_dir.length() - 1);
+                std::string reason = (direction == "F") ? "Forward primer" : "Reverse primer";
+                
+                std::string display_seq = result->data;
+                if (display_seq.length() > 30) {
+                    display_seq = display_seq.substr(0, 27) + "...";
+                }
+                
+                std::cout << std::setw(8) << output_idx
+                          << std::setw(8) << pair_idx
+                          << std::setw(10) << direction
+                          << std::setw(12) << std::fixed << std::setprecision(1) << result->dg
+                          << std::setw(35) << display_seq
+                          << std::endl;
+            }
+            std::cout << std::string(73, '-') << std::endl;
+        }
+        
+        // TABLE A2: Filtered Standalone Primers
+        if (!worst_standalone.empty()) {
+            std::cout << "\nFiltered Oligos" << std::endl;
+            std::cout << std::string(73, '-') << std::endl;
+            std::cout << std::setw(8) << "PDR pair"
+                      << std::setw(8) << "Index"
+                      << std::setw(10) << "Type"
+                      << std::setw(12) << "dG"
+                      << std::setw(35) << "Sequence"
+                      << std::endl;
+            std::cout << std::string(73, '-') << std::endl;
+            
+            // Sort by output, then type, then index
+            std::vector<std::pair<std::tuple<int, std::string, int>, const Result*>> sorted_standalone(
+                worst_standalone.begin(), worst_standalone.end());
+            
+            std::sort(sorted_standalone.begin(), sorted_standalone.end(),
+                [](const auto& a, const auto& b) {
+                    if (std::get<0>(a.first) != std::get<0>(b.first))
+                        return std::get<0>(a.first) < std::get<0>(b.first);
+                    if (std::get<1>(a.first) != std::get<1>(b.first))
+                        return std::get<1>(a.first) < std::get<1>(b.first);
+                    return std::get<2>(a.first) < std::get<2>(b.first);
+                });
+            
+            for (const auto& [key, result] : sorted_standalone) {
+                int output_idx = std::get<0>(key);
+                std::string type = std::get<1>(key);
+                int idx = std::get<2>(key);
+                
+                std::string reason = (type == "L") ? "Standalone left" : "Standalone right";
+                
+                std::string display_seq = result->data;
+                if (display_seq.length() > 30) {
+                    display_seq = display_seq.substr(0, 27) + "...";
+                }
+                
+                std::cout << std::setw(8) << output_idx
+                          << std::setw(8) << idx
+                          << std::setw(10) << type
+                          << std::setw(12) << std::fixed << std::setprecision(1) << result->dg
+                          << std::setw(35) << display_seq
+                          << std::endl;
+            }
+            std::cout << std::string(73, '-') << std::endl;
+        }
+    }
+    
+    // Process each output for summary (same logic as before but simplified)
+    struct OutputSummary {
+        size_t original_pairs, original_left, original_right;
+        size_t final_pairs, final_left, final_right;
+        size_t removed_count;
+        bool has_removal;
+    };
+    
+    std::vector<OutputSummary> output_summaries;
+    size_t total_pairs_kept = 0, total_left_kept = 0, total_right_kept = 0;
+    
+    for (size_t output_idx = 0; output_idx < original_primers.size(); ++output_idx) {
+        const auto& original = original_primers[output_idx];
+        PrimerOutput filtered_output;
+        
+        OutputSummary summary;
+        summary.original_pairs = original.pairs.size();
+        summary.original_left = original.left_oligos.size();
+        summary.original_right = original.right_oligos.size();
+        summary.removed_count = results_by_output.count(output_idx) ? results_by_output[output_idx].size() : 0;
+        summary.has_removal = (summary.removed_count > 0);
+        
+        // Apply same filtering logic as before...
+        std::set<int> remove_pair_indices_F, remove_pair_indices_R;
+        std::set<int> remove_left_indices, remove_right_indices;
+        
+        if (results_by_output.count(output_idx)) {
+            for (const auto* result : results_by_output[output_idx]) {
+                const std::string& label = result->label;
+                
+                if (label.find("_P") != std::string::npos) {
+                    size_t p_pos = label.find("_P");
+                    size_t f_pos = label.find("_F");
+                    size_t r_pos = label.find("_R");
+                    
+                    if (p_pos != std::string::npos && (f_pos != std::string::npos || r_pos != std::string::npos)) {
+                        try {
+                            std::string idx_str = label.substr(p_pos + 2, 
+                                (f_pos != std::string::npos ? f_pos : r_pos) - p_pos - 2);
+                            int pair_idx = std::stoi(idx_str);
+                            
+                            if (f_pos != std::string::npos) {
+                                remove_pair_indices_F.insert(pair_idx);
+                            } else {
+                                remove_pair_indices_R.insert(pair_idx);
+                            }
+                        } catch (...) {}
+                    }
+                }
+                else if (label.find("_L") != std::string::npos) {
+                    size_t l_pos = label.find("_L");
+                    try {
+                        int left_idx = std::stoi(label.substr(l_pos + 2));
+                        remove_left_indices.insert(left_idx);
+                    } catch (...) {}
+                }
+                else if (label.find("_R") != std::string::npos) {
+                    size_t r_pos = label.find("_R");
+                    try {
+                        int right_idx = std::stoi(label.substr(r_pos + 2));
+                        remove_right_indices.insert(right_idx);
+                    } catch (...) {}
+                }
+            }
+        }
+        
+        // Apply filtering and count
+        summary.final_pairs = 0;
+        for (size_t i = 0; i < original.pairs.size(); ++i) {
+            int pair_idx = static_cast<int>(i);
+            if (!remove_pair_indices_F.count(pair_idx) && !remove_pair_indices_R.count(pair_idx)) {
+                filtered_output.pairs.push_back(original.pairs[i]);
+                summary.final_pairs++;
+            }
+        }
+        
+        summary.final_left = 0;
+        for (size_t i = 0; i < original.left_oligos.size(); ++i) {
+            int left_idx = static_cast<int>(i);
+            if (!remove_left_indices.count(left_idx)) {
+                filtered_output.left_oligos.push_back(original.left_oligos[i]);
+                summary.final_left++;
+            }
+        }
+        
+        summary.final_right = 0;
+        for (size_t i = 0; i < original.right_oligos.size(); ++i) {
+            int right_idx = static_cast<int>(i);
+            if (!remove_right_indices.count(right_idx)) {
+                filtered_output.right_oligos.push_back(original.right_oligos[i]);
+                summary.final_right++;
+            }
+        }
+        
+        total_pairs_kept += summary.final_pairs;
+        total_left_kept += summary.final_left;
+        total_right_kept += summary.final_right;
+        
+        output_summaries.push_back(summary);
+        filtered_outputs[output_idx] = std::move(filtered_output);
+    }
+    
+    // TABLE B: Summary by output
+    std::cout << "\nOutput Summary" << std::endl;
+    std::cout << std::string(62, '-') << std::endl;
+    std::cout << std::setw(8) << "PDR pair"
+              << std::setw(18) << "Original (P/L/R)"
+              << std::setw(18) << "Removed (P/L/R)"
+              << std::setw(18) << "Final (P/L/R)"
+              << std::endl;
+    std::cout << std::string(62, '-') << std::endl;
+    
+    for (size_t i = 0; i < output_summaries.size(); ++i) {
+        const auto& summary = output_summaries[i];
+        
+        std::string original_str = std::to_string(summary.original_pairs) + "/" + 
+                                  std::to_string(summary.original_left) + "/" + 
+                                  std::to_string(summary.original_right);
+        
+        std::string final_str = std::to_string(summary.final_pairs) + "/" + 
+                               std::to_string(summary.final_left) + "/" + 
+                               std::to_string(summary.final_right);
+        
+        // Calculate actual removed counts per type
+        size_t removed_pairs = summary.original_pairs - summary.final_pairs;
+        size_t removed_left = summary.original_left - summary.final_left;
+        size_t removed_right = summary.original_right - summary.final_right;
+        
+        std::string removed_str = std::to_string(removed_pairs) + "/" + 
+                                 std::to_string(removed_left) + "/" + 
+                                 std::to_string(removed_right);
+        
+        std::string status = summary.has_removal ? "Filtered" : "No removal";
+        
+        std::cout << std::setw(8) << i
+                  << std::setw(18) << original_str
+                  << std::setw(18) << removed_str
+                  << std::setw(18) << final_str
+                  << std::endl;
+    }
+    
+    // Calculate totals
+    size_t total_original = 0, total_final = 0;
+    for (const auto& summary : output_summaries) {
+        total_original += summary.original_pairs + summary.original_left + summary.original_right;
+    }
+    total_final = total_pairs_kept + total_left_kept + total_right_kept;
+    
+    std::cout << std::string(62, '-') << std::endl;
+    std::cout << std::setw(8) << "TOTAL"
+              << std::setw(18) << std::to_string(total_original)
+              << std::setw(18) << total_to_remove
+              << std::setw(18) << std::to_string(total_final)
+              << std::endl;
+    std::cout << std::string(62, '-') << std::endl;
+    
+    return filtered_outputs;
 }

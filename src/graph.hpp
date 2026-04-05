@@ -1,8 +1,10 @@
 #pragma once
 #include "utility.hpp"
+#include "thal.hpp"
 
 class KPartiteGraph {
     public:
+        KPartiteGraph(const std::vector<PrimerOutput>& input);
         KPartiteGraph(index_t K, index_t N);
         KPartiteGraph(std::string filename);
         ~KPartiteGraph();

@@ -1,5 +1,89 @@
 #include "graph.hpp"
 
+KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
+    K = input.size() * 2;
+    N = 0;
+    for (const auto& item : input) {
+        N = std::max((long unsigned int)N,
+            std::max(item.left_oligos.size(),
+                    item.right_oligos.size()));
+    }
+
+    auto get_oligo = [&](index_t idx) -> const Oligo* {
+        index_t k = idx / N;
+        index_t n = idx % N;
+        if (k % 2 == 0) {
+            const auto& v = input[k / 2].left_oligos;
+            return n < v.size() ? &v[n] : nullptr;
+        } else {
+            const auto& v = input[k / 2].right_oligos;
+            return n < v.size() ? &v[n] : nullptr;
+        }
+    };
+
+    // count total edges to compute
+    std::size_t total_edges = 0;
+    for (index_t i = 0; i < K * N; i++)
+        for (index_t j = i + 1; j < K * N; j++)
+            if (part(i) != part(j) && get_oligo(i) && get_oligo(j))
+                total_edges++;
+
+const int TW = 14 + 4 + 10 + 6; // = 34
+    std::cout << "K = " << K << " N = " << N
+              << " nodes = " << K * N << "\n"
+              << "edges to compute = " << total_edges << "\n\n"
+              << "Constructing KPartite Graph...\n"
+              << std::string(TW, '-') << "\n"
+              << std::right
+              << std::setw(14) << "computed"
+              << std::setw(4)  << " / "
+              << std::setw(10) << "total"
+              << std::setw(6)  << "pct"
+              << "\n"
+              << std::string(TW, '-') << "\n";
+
+    graph = new weight_t*[K * N];
+    for (index_t i = 0; i < K * N; i++)
+        graph[i] = new weight_t[K * N];
+
+    std::size_t count = 0;
+    std::size_t step  = std::max((std::size_t)1, total_edges / 20);
+    std::size_t next  = step;
+
+    for (index_t i = 0; i < K * N; i++) {
+        for (index_t j = i; j < K * N; j++) {
+            if (part(i) == part(j)) {
+                graph[i][j] = graph[j][i] = 0;
+                continue;
+            }
+            graph[i][j] = graph[j][i] = INF;
+            const Oligo* oi = get_oligo(i);
+            const Oligo* oj = get_oligo(j);
+            if (oi && oj) {
+                graph[i][j] = graph[j][i] = 
+                    Thal::compute_dimer_dg(oi->seq, oj->seq);
+                count++;
+                if (count >= next) {
+                    int pct = (int)(100.0 * count / total_edges);
+                    std::cout << std::right
+                              << std::setw(14) << count
+                              << std::setw(4)  << " / "
+                              << std::setw(10) << total_edges
+                              << std::setw(5)  << pct << "%\n";
+                    next += step;
+                }
+            }
+        }
+    }
+    std::cout << std::string(TW, '-') << "\n"
+              << "Computed " << count << " edge weights.\n\n";
+
+    opt_graph = opt_graph_2 = NULL;
+    vertices = new weight_t[K * N];
+    for (index_t i = 0; i < K * N; i++)
+        vertices[i] = 0;
+}
+
 KPartiteGraph::KPartiteGraph(index_t K, index_t N) {
     this->K = K;
     this->N = N;
@@ -45,12 +129,17 @@ KPartiteGraph::~KPartiteGraph() {
     for (index_t i = 0; i < K * N; i ++) 
         delete [] graph[i];
     delete [] graph;
-    for (index_t i = 0; i < K; i ++) 
-        delete [] opt_graph[i];
-    delete [] opt_graph;
-    for (index_t i = 0; i < K; i ++) 
-        delete [] opt_graph_2[i];
-    delete [] opt_graph_2;
+    delete [] vertices;
+    if (opt_graph != NULL) {
+        for (index_t i = 0; i < K; i ++) 
+            delete [] opt_graph[i];
+        delete [] opt_graph;
+    }
+    if (opt_graph_2 != NULL) {
+        for (index_t i = 0; i < K; i ++) 
+            delete [] opt_graph_2[i];
+        delete [] opt_graph_2;
+    }
 }
 
 void KPartiteGraph::random_weights() {
@@ -238,18 +327,27 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
 
     weight_t global_best = std::numeric_limits<weight_t>::lowest();
 
+    std::cout << "Random search: " << restarts << " restarts\n"
+              << std::string(55, '-') << "\n"
+              << std::right
+              << std::setw(10) << "restart"
+              << std::setw(15) << "local_opt"
+              << std::setw(15) << "global_best"
+              << std::setw(8)  << "moves"
+              << "\n"
+              << std::string(55, '-') << "\n";
+
     for (std::size_t r = 0; r < restarts; ++r) {
-        // random init: NOTE random_between must be [lo, hi] inclusive.
         for (int p = 0; p < (int)K; ++p) solution[p] = random_between(0, N - 1);
 
         init_S_and_contrib();
         weight_t current = total_from_S();
+        int moves = 0;
 
         while (true) {
             int best_p = -1, best_n = -1;
-            weight_t best_gain = 0; // stop when no positive gain
+            weight_t best_gain = 0;
 
-            // Best-improvement scan with O(1) gain lookups
             for (int p = 0; p < (int)K; ++p) {
                 for (int n = 0; n < (int)N; ++n) {
                     if (n == solution[p]) continue;
@@ -262,43 +360,52 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
                 }
             }
 
-            if (best_p == -1) break; // local optimum
+            if (best_p == -1) break;
 
-            // Apply move (best_p := best_n)
             const index_t old_v = gv(best_p);
             solution[best_p] = best_n;
             const index_t new_v = gv(best_p);
             current += best_gain;
+            moves++;
 
-            // 1) Update S for all parts (O(K))
             for (int q = 0; q < (int)K; ++q) if (q != best_p)
                 S[q] += w(new_v, gv(q)) - w(old_v, gv(q));
             S[best_p] = contrib[best_p][best_n];
 
-            // 2) Update contrib for all other parts/candidates (O(K·N))
-            for (int q = 0; q < (int)K; ++q) if (q != best_p) {
+            for (int q = 0; q < (int)K; ++q) if (q != best_p)
                 for (int m = 0; m < (int)N; ++m) {
                     const index_t u = index(q, m);
                     contrib[q][m] += w(u, new_v) - w(u, old_v);
                 }
-            }
 
-            // 3) Rebuild contrib for the changed part (O(K·N))
             for (int n = 0; n < (int)N; ++n) {
                 const index_t v_ = index(best_p, n);
-                weight_t s = 0; // v(v_) * 2;
+                weight_t s = 0;
                 for (int q = 0; q < (int)K; ++q) if (q != best_p)
                     s += w(v_, gv(q));
                 contrib[best_p][n] = s;
             }
         }
 
-        if (current > global_best) {
+        bool improved = current > global_best;
+        if (improved) {
             global_best = current;
             best_solution = solution;
-            // Optional: std::cout << "restart " << r << " best " << global_best << "\n";
+        }
+
+        if (improved || r % 100 == 0) {
+            std::cout << std::right << std::fixed
+                      << std::setw(10) << r
+                      << std::setw(15) << std::scientific << std::setprecision(3) << current
+                      << std::setw(15) << global_best
+                      << std::setw(8)  << moves
+                      << (improved ? "  *" : "")
+                      << "\n";
         }
     }
+
+    std::cout << std::string(55, '-') << "\n"
+              << "Best solution: " << global_best << "\n";
 
     return best_solution;
 }

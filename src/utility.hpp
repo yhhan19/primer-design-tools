@@ -22,6 +22,9 @@
 #include <cctype>
 #include <iomanip>
 #include <numeric>
+#include <atomic>
+#include <set>
+#include <map>
 
 extern "C" {
 #include "thal.h"
@@ -113,7 +116,7 @@ struct PipelineContext {
     std::string               tmpl;
     std::vector<std::string>  labels, sequences;
     std::vector<index_t>      pdr_regions;
-    std::vector<PrimerOutput> candidate_primers;
+    std::vector<PrimerOutput> candidate_primers, filtered_primers;
     std::vector<index_t>      dimer_solution;
     std::vector<Result>       off_target_hits;
 };
@@ -161,3 +164,23 @@ std::size_t         random_between(std::size_t min, std::size_t max);
 std::string msa_consensus(const std::vector<std::string>& msa);
 
 void display_primer_output(const PrimerOutput& out);
+
+void convert(const std::vector<PrimerOutput>& primer_output,
+             std::vector<std::string>& labels,
+             std::vector<std::string>& sequences);
+
+
+Oligo extract_oligo(const primer_rec& p,
+                    const char* sequence,
+                    bool is_right);
+
+PrimerOutput extract_all(const p3retval* retval,
+                         const seq_args*  sa);
+
+std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
+                                     double dg_threshold,
+                                     const std::vector<PrimerOutput>& original_primers);
+
+std::vector<PrimerOutput> filterByDG_debug(const std::vector<Result>& results,
+                                           double dg_threshold,
+                                           const std::vector<PrimerOutput>& original_primers);

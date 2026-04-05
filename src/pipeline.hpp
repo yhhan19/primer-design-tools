@@ -26,12 +26,6 @@ public:
     std::string short_name() const { return "p3"; }
     void run(PipelineContext& ctx);
     ~PrimerSelStage() {}
-private:
-    Oligo extract_oligo(const primer_rec& p,
-                        const char* sequence,
-                        bool is_right);
-    PrimerOutput extract_all(const p3retval* retval,
-                             const seq_args*  sa);
 };
 
 class DimerStage     : public Stage {

@@ -454,27 +454,50 @@ risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk
     return min_risk;
 }
 
-std::vector<index_t> RiskOptimizer::search(risk_t lower, risk_t upper, risk_t eps) {
-    std::cout << "Search for optimal PDR ...\n";
-    std::cout << std::setw(8) << "i" << std::setw(12) << "u'" << std::setw(12) << "loss'" << std::setw(12) << "loss" << std::endl;
+std::vector<index_t> RiskOptimizer::search(risk_t lower, 
+                                           risk_t upper, 
+                                           risk_t eps) {
+    const int TW = 8 + 12 + 12 + 12; // = 44
+    std::cout << "Search for optimal PDR...\n"
+              << std::string(TW, '-') << "\n"
+              << std::right
+              << std::setw(8)  << "iter"
+              << std::setw(12) << "u'"
+              << std::setw(12) << "loss'"
+              << std::setw(12) << "loss"
+              << "\n"
+              << std::string(TW, '-') << "\n";
+
     max -= len; min -= len;
     std::vector<index_t> min_PDR, final_PDR, temp_PDR;
     risk_t alpha = ALPHA, l = lower, r = upper;
-    for (index_t i = 1; r - l > eps; i ++) {
+
+    for (index_t i = 1; r - l > eps; i++) {
         risk_t u = (l + r) / 2, temp;
-        if (min == max) 
+        if (min == max)
             temp = top_k_opt_fast(u, min_PDR, alpha);
-        else 
-            temp = top_k_opt_mi(u, min_PDR, alpha); // assert(std::fabs(top_k_opt_m(u, temp_PDR, alpha) - temp) < 1e-6);
-        if (final_PDR.size() == 0 || score(min_PDR, alpha) < score(final_PDR, alpha)) 
+        else
+            temp = top_k_opt_mi(u, min_PDR, alpha);
+
+        if (final_PDR.size() == 0 || score(min_PDR, alpha) < score(final_PDR, alpha))
             final_PDR = min_PDR;
+
         risk_t grad = alpha * min_PDR.size();
-        for (index_t i = 0; i < min_PDR.size(); i ++) 
-            if (u < cost(min_PDR[i], 0, 0)) grad --;
+        for (index_t j = 0; j < min_PDR.size(); j++)
+            if (u < cost(min_PDR[j], 0, 0)) grad--;
         *(&(grad < 0 ? l : r)) = u;
-        std::cout << std::setw(8) << i << std::setw(12) << u << std::setw(12) << temp << std::setw(12) << score(min_PDR, alpha) << std::endl;
+
+        std::cout << std::right
+                  << std::setw(8)  << i
+                  << std::setw(12) << u
+                  << std::setw(12) << temp
+                  << std::setw(12) << score(min_PDR, alpha)
+                  << "\n";
     }
+
+    std::cout << std::string(TW, '-') << "\n";
     max += len; min += len;
     std::cout << "Search completed!\n\n";
     return final_PDR;
 }
+
