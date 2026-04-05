@@ -140,6 +140,12 @@ void DimerStage::run(PipelineContext& ctx) {
 }
 
 void OffTargetStage::run(PipelineContext& ctx) {
+    if (ctx.args.ref_file == "") {
+        std::cout << "No ref file provided, skip off target search\n";
+        ctx.filtered_primers = ctx.candidate_primers;
+        return ;
+    }
+
     Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 
             ctx.args.mv, 
             ctx.args.dv, 
@@ -160,10 +166,10 @@ void OffTargetStage::run(PipelineContext& ctx) {
             ctx.args.nthreads);
     delete ac;
 
+    write_results(ctx.args.output_file + "." + short_name(), results, labels);
+
     ctx.filtered_primers = filterByDG(results, -18000, ctx.candidate_primers);
     // for (auto &out : ctx.filtered_primers) display_primer_output(out);
-    
-    write_results(ctx.args.output_file + "." + short_name(), results, labels);
 }
 
 void Pipeline::run(PipelineContext& ctx) {

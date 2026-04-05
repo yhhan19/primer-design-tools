@@ -78,7 +78,6 @@ const int TW = 14 + 4 + 10 + 6; // = 34
     std::cout << std::string(TW, '-') << "\n"
               << "Computed " << count << " edge weights.\n\n";
 
-    opt_graph = opt_graph_2 = NULL;
     vertices = new weight_t[K * N];
     for (index_t i = 0; i < K * N; i++)
         vertices[i] = 0;
@@ -90,12 +89,6 @@ KPartiteGraph::KPartiteGraph(index_t K, index_t N) {
     graph = new weight_t*[K * N];
     for (index_t i = 0; i < K * N; i ++) 
         graph[i] = new weight_t[K * N];
-    opt_graph = new weight_t*[K];
-    for (index_t i = 0; i < K; i ++) 
-        opt_graph[i] = new weight_t[K];
-    opt_graph_2 = new weight_t*[K * N];
-    for (index_t i = 0; i < K * N; i ++) 
-        opt_graph_2[i] = new weight_t[K];
     vertices = new weight_t[K * N];
 }
 
@@ -130,16 +123,6 @@ KPartiteGraph::~KPartiteGraph() {
         delete [] graph[i];
     delete [] graph;
     delete [] vertices;
-    if (opt_graph != NULL) {
-        for (index_t i = 0; i < K; i ++) 
-            delete [] opt_graph[i];
-        delete [] opt_graph;
-    }
-    if (opt_graph_2 != NULL) {
-        for (index_t i = 0; i < K; i ++) 
-            delete [] opt_graph_2[i];
-        delete [] opt_graph_2;
-    }
 }
 
 void KPartiteGraph::random_weights() {
@@ -153,26 +136,6 @@ void KPartiteGraph::random_weights() {
     }
     for (index_t i = 0; i < K * N; i ++) {
         vertices[i] = - (weight_t) rand() / RAND_MAX;
-    }
-}
-
-void KPartiteGraph::preprocessing() {
-    for (index_t i = 0; i < K * N; i ++) {
-        for (index_t j = 0; j < K; j ++) {
-            weight_t temp = 0;
-            for (index_t j_ = 0; j_ < N; j_ ++)
-                temp = std::max(temp, graph[i][index(j, j_)]);
-            opt_graph_2[i][j] = temp;
-        }
-    }
-    for (index_t i = 0; i < K; i ++) {
-        for (index_t j = i + 1; j < K; j ++) {
-            weight_t temp = 0;
-            for (index_t i_ = 0; i_ < N; i_ ++) 
-                for (index_t j_ = 0; j_ < N; j_ ++) 
-                    temp = std::max(temp, graph[index(i, i_)][index(j, j_)]);
-            opt_graph[i][j] = opt_graph[j][i] = temp;
-        }
     }
 }
 

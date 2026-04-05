@@ -122,9 +122,7 @@ void write_results(const std::string& output_file,
         out << "\n";
     }
 
-    std::cout << "Result size      : " << results.size() << "\n"
-              << "Output size      : " << count          << "\n"
-              << "Output saved in  : " << output_file    << "\n";
+    // std::cout << "Output saved in  : " << output_file    << "\n";
 }
 
 
@@ -423,10 +421,7 @@ std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
     
     // Group results by output index - these are primers to REMOVE
     std::unordered_map<int, std::vector<const Result*>> results_by_output;
-    
-    std::cout << "=== DG-BASED PRIMER REMOVAL ===" << std::endl;
-    std::cout << "dG threshold: " << dg_threshold << std::endl;
-    
+
     size_t total_to_remove = 0;
     for (const auto& result : results) {
         if (result.dg <= dg_threshold) {  // These meet criteria for REMOVAL
