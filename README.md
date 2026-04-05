@@ -20,12 +20,9 @@ A comprehensive C++ tool for primer design optimization and off-target screening
 ### Build
 ```bash
 git clone <repo_url>
-cd dpro
+cd primer-design-tools
 make
-# or
-g++ -std=c++17 -O3 -pthread -o bin/dpro src/*.cpp
 ```
-
 The executable will be generated as `bin/dpro`.
 
 ## Usage
