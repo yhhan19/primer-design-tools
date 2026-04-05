@@ -1,15 +1,14 @@
 # DPRO - Primer Design and Off-Target Analysis Tool
 
-A comprehensive C++ tool for bluetongue virus (BTV) primer design, optimization, and off-target screening. DPRO provides three specialized modes for bioinformatics workflows: PDR optimization, dimer checking, and off-target analysis with advanced filtering capabilities.
+A comprehensive C++ tool for primer design optimization and off-target screening. DPRO provides an integrated pipeline for primer analysis workflows including design region optimization, dimer checking, and off-target analysis with advanced filtering capabilities.
 
 ## Features
 
-- **PDR Optimization (`pdr`)**: Risk-based primer design region optimization with customizable amplicon constraints
-- **Dimer Analysis (`dimer`)**: Detection and minimization of primer-primer interactions  
-- **Off-target Screening (`off`)**: High-performance off-target search with thermodynamic filtering
-- **Advanced Filtering**: dG-based primer quality control with detailed removal reporting
-- **Multi-threaded Processing**: Optimized for large reference genomes (livestock host screening)
+- **Integrated Pipeline**: Complete primer analysis from design through off-target screening
+- **Advanced Filtering**: Thermodynamic-based primer quality control with detailed removal reporting
+- **Multi-threaded Processing**: Optimized for large reference genomes and high-throughput analysis
 - **Comprehensive Reporting**: Detailed tables showing filtered primers and summary statistics
+- **Flexible Parameters**: Customizable thermodynamic and search parameters
 
 ## Installation
 
@@ -32,52 +31,42 @@ The executable will be generated as `bin/dpro`.
 ## Usage
 
 ```bash
-./bin/dpro <mode> -i <input> -o <output> [options]
+./bin/dpro all -i <input> -o <output> [options]
 ```
-
-### Modes
-- `pdr` - PDR optimization mode
-- `dimer` - Dimer analysis mode  
-- `off` - Off-target search mode
-- `all` - Run complete pipeline (PDR → dimer → off-target)
 
 ### Core Arguments
 ```bash
--i <file>    Input file (required)
--o <file>    Output file/directory (required)
--r <file>    Reference genome file (optional for off mode)
+-i <file>    Input sequence file (required)
+-o <file>    Output directory (required)
+-r <file>    Reference genome file (optional)
 -h, --help   Show help message
 ```
 
-## Mode-Specific Parameters
+## Parameters
 
-### PDR Optimization (`pdr`)
+### Search Parameters
 ```bash
--Ln <int>     Amplicon max length (default: 420)
--Lx <int>     Amplicon min length (default: 252)  
--Lp <int>     PDR length (default: 40)
--Ux <double>  Max risk threshold (default: 10000.0)
--Un <double>  Min risk threshold (default: 0.1)
+-k <int>       Kmer length for indexing (default: 15)
+-H <int>       Hamming distance threshold (default: 3)  
+-H2 <int>      Alternative Hamming threshold (default: 3)
+-t <int>       Number of threads (default: 8)
+-C <int>       Processing chunk size (default: 100000)
+-B <int>       I/O block size (default: 8192)
+```
+
+### Optimization Parameters
+```bash
+-Ln <int>     Maximum amplicon length (default: 420)
+-Lx <int>     Minimum amplicon length (default: 252)  
+-Lp <int>     Primer design region length (default: 40)
+-Ux <double>  Maximum risk threshold (default: 10000.0)
+-Un <double>  Minimum risk threshold (default: 0.1)
+-I <int>      Optimization iterations (default: 1000)
 -S <int>      Random seed (default: 42)
 ```
 
-### Dimer Analysis (`dimer`)
+### Thermodynamic Parameters  
 ```bash
--I <int>   Optimization iterations (default: 1000)
--S <int>   Random seed (default: 42)
-```
-
-### Off-target Search (`off`)
-```bash
-# Search Parameters
--k <int>       Kmer length (default: 15)
--H <int>       Hamming threshold (default: 3)  
--H2 <int>      Hamming threshold odd (default: 3)
--t <int>       Number of threads (default: 8)
--C <int>       Chunk size (default: 100000)
--B <int>       I/O block size (default: 8192)
-
-# Thermodynamic Parameters  
 -G <double>     dG threshold for filtering (default: -20000.0)
 --mv <double>   Monovalent concentration mM (default: 50.0)
 --dv <double>   Divalent concentration mM (default: 1.5) 
@@ -88,48 +77,60 @@ The executable will be generated as `bin/dpro`.
 
 ## Examples
 
-### BTV Primer Screening Workflow
+### Basic Pipeline Analysis
 ```bash
-# Complete pipeline for BTV segment 1
+# Complete pipeline with reference genome screening
 ./bin/dpro all \
-  -i ./scripts/aligned_sequences/segment_1.aligned.fasta \
-  -o ./bin/tmp \
-  -r ./scripts/ref/livestock_combined.fna
-
-# Off-target screening only
-./bin/dpro off \
-  -i primers.fasta \
-  -o results/ \
-  -r livestock_genomes.fna \
-  -G -25000.0 \
-  -t 16
-
-# PDR optimization with custom parameters
-./bin/dpro pdr \
   -i sequences.fasta \
-  -o optimized_primers.txt \
-  -Ln 300 \
-  -Lx 150 \
-  -Ux 5000.0
+  -o results/ \
+  -r reference_genome.fna
+
+# Pipeline without off-target screening
+./bin/dpro all \
+  -i sequences.fasta \
+  -o results/
+
+# Custom parameters for stringent filtering
+./bin/dpro all \
+  -i sequences.fasta \
+  -o results/ \
+  -r genome.fna \
+  -G -25000.0 \
+  -t 16 \
+  -H 2
 ```
 
-## Input Formats
+### Advanced Configuration
+```bash
+# High-throughput analysis
+./bin/dpro all \
+  -i large_dataset.fasta \
+  -o analysis_results/ \
+  -r combined_genomes.fna \
+  -t 32 \
+  -C 200000 \
+  -B 16384
 
-### PDR/Dimer Modes
+# Custom thermodynamic conditions
+./bin/dpro all \
+  -i primers.fasta \
+  -o filtered_results/ \
+  -r host_genome.fna \
+  --temp 65.0 \
+  --mv 100.0 \
+  --dna 25.0
+```
+
+## Input Format
+
 - **Input**: FASTA format with target sequences
-- **Output**: Optimized primer sets with coordinates and scores
-
-### Off-target Mode  
-- **Input**: FASTA format primer sequences
-- **Reference**: FASTA format reference genomes
-- **Output**: Filtered primers with off-target analysis
+- **Reference**: FASTA format reference genomes (optional)
 
 ## Output Structure
 
-### Off-target Search Output
-The tool generates comprehensive filtering reports:
+The pipeline generates comprehensive analysis reports:
 
-**TABLE A1: Filtered Primer Pairs**
+### TABLE A1: Filtered Primer Pairs
 ```
 Output  Index  Direction  dG        Sequence                    Reason
 ------  -----  ---------  --------  --------------------------  --------------
@@ -137,7 +138,7 @@ Output  Index  Direction  dG        Sequence                    Reason
 3       1      R          -17132.7  CCTTAACCGGAATTGGCCAA...     Reverse primer
 ```
 
-**TABLE A2: Filtered Standalone Primers**  
+### TABLE A2: Filtered Standalone Primers  
 ```
 Output  Index  Type  dG        Sequence                    Reason
 ------  -----  ----  --------  --------------------------  ---------------
@@ -145,12 +146,25 @@ Output  Index  Type  dG        Sequence                    Reason
 7       39     L     -20314.9  AAATTTGGGCCCAAATTTGG...     Standalone left
 ```
 
-**TABLE B: Output Summary**
+### TABLE B: Output Summary
 ```
 Output  Original (P/L/R)  Removed (P/L/R)  Final (P/L/R)  Status
 ------  ----------------  ---------------  -------------  ----------
 0       10/63/5           0/0/0            10/63/5        No removal
 3       10/28/45          2/3/8            8/25/37        Filtered
+6       10/19/83          2/3/12           8/16/71        Filtered
+```
+
+### Processing Progress
+```
+Searching reference.fna (threads: 8)
+------------------------------------------------------------
+   Contigs      Chunks    Candidates    Time(s)  Rate(ch/s)
+------------------------------------------------------------
+      1250        1000            78        30      2.5M
+      2890        2400           156        60      2.8M
+------------------------------------------------------------
+Found 234 primer candidates
 ```
 
 ## Performance Features
@@ -158,31 +172,31 @@ Output  Original (P/L/R)  Removed (P/L/R)  Final (P/L/R)  Status
 - **Multi-threaded processing** with configurable thread counts
 - **Memory-efficient chunked processing** for large genomes  
 - **Progress reporting** with processing rates (characters/second)
-- **Optimized for livestock genome screening** (cattle, sheep, goat)
+- **Optimized indexing** for fast sequence searching
 
-## Reference Genome Support
+## Pipeline Stages
 
-The tool is optimized for screening against livestock host genomes:
-- **Cattle**: ARS-UCD1.2 (~2.7GB)
-- **Sheep**: ARS-UI_Ramb_v2.0 (~2.9GB)  
-- **Goat**: ARS1 (~2.9GB)
+1. **Design Region Optimization** - Risk-based primer selection
+2. **Dimer Analysis** - Detection and minimization of primer interactions  
+3. **Off-target Screening** - Reference genome analysis with thermodynamic filtering
+4. **Quality Control** - Advanced filtering with detailed reporting
 
-If no reference file is provided for off-target mode:
+If no reference file is provided:
 ```
 No ref file provided, skip off target search
 ```
+
+## File Output
+
+- Optimized primer sequences
+- Quality control reports  
+- Off-target analysis results
+- Processing statistics and logs
 
 ## License
 
 This project is licensed under the MIT License.
 
-## Citation
-
-If you use DPRO in your research, please cite:
-Scaling Variant-Aware Multiplex Primer Design
-Yunheng Han, Christina Boucher
-bioRxiv 2026.02.03.703607; doi: https://doi.org/10.64898/2026.02.03.703607
-
 ## Support
 
-For questions or issues, please open an issue on the GitHub repository or contact the development team.
+For questions or issues, please open an issue on the GitHub repository.
