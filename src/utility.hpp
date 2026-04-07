@@ -96,7 +96,7 @@ struct Args {
     std::size_t seed        = 42;
 
     std::size_t kmer_len    = 8;
-    std::size_t threshold   = 3;
+    std::size_t threshold   = 4;
     std::size_t nthreads    = 8;
     std::size_t block_size  = 1 << 27;
     std::size_t chunk_size  = (std::size_t) 1e8;
@@ -116,7 +116,7 @@ struct Args {
     double      dntp        = 0.6;
     double      dna_conc    = 200.0;
     
-    double      dg_thres    = -12000;
+    double      dg_thres    = -18000;
     double      temp        = 37.0;
 
     bool        help        = false;
@@ -201,3 +201,19 @@ void test_primer3_orientation(p3_global_settings* pa);
 
 void print_solution(const std::vector<PrimerResult>& solution,
                     const std::vector<index_t>& pdrs);
+
+struct RemovalSets {
+    std::set<int> remove_pair_F, remove_pair_R, remove_left, remove_right;
+    bool all_removed(const PrimerOutput& original) const {
+        size_t kept_left  = original.left_oligos.size()  - remove_left.size();
+        size_t kept_right = original.right_oligos.size() - remove_right.size();
+        return kept_left < 5 || kept_right < 5;
+    }
+};
+
+RemovalSets computeRemoval(const std::vector<const Result*>& output_results,
+                                   double threshold) ;
+
+std::vector<PrimerOutput> filterByDG_relax(const std::vector<Result>& results,
+                                     double dg_threshold,
+                                     const std::vector<PrimerOutput>& original_primers) ;

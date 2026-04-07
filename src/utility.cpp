@@ -755,111 +755,307 @@ std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
     return filtered_outputs;
 }
 
-void test_primer3_orientation(p3_global_settings* pa) {
-    const std::string tmpl =
-        "GCTAGCTAGCTAGCTAGCTAGCTAGC"
-        "ATCGATCGATCGATCGATCGATCGAT"
-        "ATCGATCGATCGATCGATCGATCGAT"
-        "ATCGATCGATCGATCGATCGATCGAT"
-        "CTAGCTAGCTAGCTAGCTAGCTAGCT";
+RemovalSets computeRemoval(const std::vector<const Result*>& output_results,
+                                   double threshold) {
+    RemovalSets rs;
+    for (const auto* result : output_results) {
+        if (result->dg > threshold) continue;
+        const std::string& label = result->label;
+        if (label.find("_P") != std::string::npos) {
+            size_t p_pos = label.find("_P"), f_pos = label.find("_F"), r_pos = label.find("_R");
+            if (p_pos != std::string::npos && (f_pos != std::string::npos || r_pos != std::string::npos)) {
+                try {
+                    int pair_idx = std::stoi(label.substr(p_pos + 2,
+                        (f_pos != std::string::npos ? f_pos : r_pos) - p_pos - 2));
+                    if (f_pos != std::string::npos) rs.remove_pair_F.insert(pair_idx);
+                    else                             rs.remove_pair_R.insert(pair_idx);
+                } catch (...) {}
+            }
+        } else if (label.find("_L") != std::string::npos) {
+            try { rs.remove_left.insert(std::stoi(label.substr(label.find("_L") + 2))); } catch (...) {}
+        } else if (label.find("_R") != std::string::npos) {
+            try { rs.remove_right.insert(std::stoi(label.substr(label.find("_R") + 2))); } catch (...) {}
+        }
+    }
+    return rs;
+}
 
-    seq_args* sa        = create_seq_arg();
-    sa->sequence        = strdup(tmpl.c_str());
-    sa->incl_s          = 0;
-    sa->incl_l          = tmpl.size();
-    sa->start_codon_pos = PR_DEFAULT_START_CODON_POS;
+std::vector<PrimerOutput> filterByDG_relax(const std::vector<Result>& results,
+                                     double dg_threshold,
+                                     const std::vector<PrimerOutput>& original_primers) {
 
-    p3_global_settings* test_pa = p3_create_global_settings();
-    p3_set_gs_primer_opt_size(test_pa, 18);
-    p3_set_gs_primer_min_size(test_pa, 15);
-    p3_set_gs_primer_max_size(test_pa, 27);
-    p3_set_gs_primer_opt_tm(test_pa, 55.0);
-    p3_set_gs_primer_min_tm(test_pa, 40.0);
-    p3_set_gs_primer_max_tm(test_pa, 70.0);
-    p3_set_gs_primer_min_gc(test_pa, 10.0);
-    p3_set_gs_primer_max_gc(test_pa, 90.0);
-    test_pa->pr_min[0]           = 30;
-    test_pa->pr_max[0]           = tmpl.size();
-    test_pa->num_intervals       = 1;
-    test_pa->pick_left_primer    = 1;
-    test_pa->pick_right_primer   = 1;
-    test_pa->pick_internal_oligo = 0;
-    test_pa->num_return          = 1;
+    const double RELAX_STEP    = 500;
+    const int    MAX_RELAX_STEPS = 10;
 
-    // dump what primer3 sees
-    std::cout << "[p3 test] Template length : " << tmpl.size() << "\n";
-    std::cout << "[p3 test] Template        : " << tmpl        << "\n";
-    std::cout << "[p3 test] pr_min          : " << test_pa->pr_min[0] << "\n";
-    std::cout << "[p3 test] pr_max          : " << test_pa->pr_max[0] << "\n";
-
-    p3retval* res = choose_primers(test_pa, sa);
-
-    // print all warnings and errors from primer3
-    if (res) {
-        if (res->warnings.data)
-            std::cout << "[p3 test] warnings : " << res->warnings.data << "\n";
-        if (res->glob_err.data)
-            std::cout << "[p3 test] glob_err : " << res->glob_err.data << "\n";
-        if (res->per_sequence_err.data)
-            std::cout << "[p3 test] seq_err  : " << res->per_sequence_err.data << "\n";
-
-        std::cout << "[p3 test] num_pairs : " << res->best_pairs.num_pairs << "\n";
-    } else {
-        std::cout << "[p3 test] res is null\n";
+    // Group ALL results by output index (not just those meeting threshold)
+    std::unordered_map<int, std::vector<const Result*>> results_by_output;
+    for (const auto& result : results) {
+        if (result.label.length() >= 3 && result.label.substr(0, 3) == "OUT") {
+            size_t pos = result.label.find('_');
+            if (pos != std::string::npos) {
+                try {
+                    int output_idx = std::stoi(result.label.substr(3, pos - 3));
+                    if (output_idx >= 0 && output_idx < static_cast<int>(original_primers.size()))
+                        results_by_output[output_idx].push_back(&result);
+                } catch (...) {}
+            }
+        }
     }
 
-    if (res->best_pairs.num_pairs > 0) {
-        const primer_rec* left  = res->best_pairs.pairs[0].left;
-        const primer_rec* right = res->best_pairs.pairs[0].right;
+    // Count total to remove at the global threshold (for header line)
+    size_t total_to_remove = 0;
+    for (const auto& result : results)
+        if (result.dg <= dg_threshold) total_to_remove++;
 
-        int lstart = left->start;
-        int llen   = left->length;
-        int rstart = right->start;
-        int rlen   = right->length;
+    std::cout << "Total primers to remove: " << total_to_remove << "/" << results.size()
+              << " (dG <= " << dg_threshold << ")" << std::endl;
 
-        // reconstruct from trimmed_seq
-        std::string lseq_p3(sa->trimmed_seq + lstart, llen);
-        std::string rseq_p3(sa->trimmed_seq + rstart, rlen);
+    std::vector<PrimerOutput> filtered_outputs(original_primers.size());
 
-        // 3' end of right primer on top strand
-        int r3prime = rstart + rlen - 1;
+    // Collect worst-dG per unique primer for reporting tables
+    std::map<std::tuple<int, std::string, int>, const Result*> worst_pairs;
+    std::map<std::tuple<int, std::string, int>, const Result*> worst_standalone;
 
-        // amplicon
-        int amp_len  = r3prime - lstart + 1;
-        std::string amplicon = tmpl.substr(lstart, amp_len);
+    // Per-output effective thresholds (may differ from global if relaxed)
+    std::vector<double> effective_threshold(original_primers.size(), dg_threshold);
 
-        std::cout << "[p3 test] lstart         : " << lstart  << "\n";
-        std::cout << "[p3 test] rstart         : " << rstart  << "\n";
-        std::cout << "[p3 test] r3prime        : " << r3prime << "\n";
-        std::cout << "[p3 test] amp_len        : " << amp_len << "\n\n";
+    struct OutputSummary {
+        size_t original_pairs, original_left, original_right;
+        size_t final_pairs, final_left, final_right;
+        bool has_removal;
+        bool was_relaxed;
+    };
 
-        std::cout << "[p3 test] Left  p3 seq   : " << lseq_p3 << "\n";
-        std::cout << "[p3 test] Right p3 seq   : " << rseq_p3 << "\n\n";
+    std::vector<OutputSummary> output_summaries;
+    size_t total_pairs_kept = 0, total_left_kept = 0, total_right_kept = 0;
 
-        std::cout << "[p3 test] Amplicon       : " << amplicon << "\n\n";
+    for (size_t output_idx = 0; output_idx < original_primers.size(); ++output_idx) {
+        const auto& original = original_primers[output_idx];
+        PrimerOutput filtered_output;
 
-        // sanity checks
-        // 1. left primer at start of amplicon
-        bool amp_starts_with_left = amplicon.substr(0, llen) == lseq_p3;
+        OutputSummary summary;
+        summary.original_pairs = original.pairs.size();
+        summary.original_left  = original.left_oligos.size();
+        summary.original_right = original.right_oligos.size();
+        summary.has_removal    = false;
+        summary.was_relaxed    = false;
 
-        // 2. right primer 3' end is at end of amplicon
-        //    revcomp of right should be at end of amplicon
-        bool amp_ends_with_right  = amplicon.substr(amp_len - rlen, rlen) == revcomp(rseq_p3);
+        auto& output_results = results_by_output[output_idx];  // empty vec if not in map
 
-        // 3. right primer should be to the RIGHT of left primer
-        bool right_is_right       = rstart > lstart + llen;
+        double local_threshold = dg_threshold;
+        RemovalSets rs = computeRemoval(output_results, local_threshold);
 
-        // 4. positions within template bounds
-        bool within_bounds        = lstart >= 0 && r3prime < (int)tmpl.size();
+        if (rs.all_removed(original)) {
+            for (int step = 1; step <= MAX_RELAX_STEPS; ++step) {
+                local_threshold -= RELAX_STEP;
+                rs = computeRemoval(output_results, local_threshold);
+                if (!rs.all_removed(original)) {
+                    std::cout << "[PDR " << output_idx << "] threshold relaxed "
+                              << dg_threshold << " -> " << local_threshold << " kcal/mol\n";
+                    effective_threshold[output_idx] = local_threshold;
+                    summary.was_relaxed = true;
+                    break;
+                }
+            }
+            if (rs.all_removed(original))
+                std::cerr << "[PDR " << output_idx << "] WARNING: still empty after max relaxation ("
+                          << (dg_threshold - MAX_RELAX_STEPS * RELAX_STEP) << " kcal/mol)\n";
+        }
 
-        std::cout << "[p3 test] Amplicon starts with left primer       : " << (amp_starts_with_left ? "YES [OK]" : "NO [FAIL]") << "\n";
-        std::cout << "[p3 test] Amplicon ends with revcomp(right)      : " << (amp_ends_with_right  ? "YES [OK]" : "NO [FAIL]") << "\n";
-        std::cout << "[p3 test] Right primer is right of left          : " << (right_is_right       ? "YES [OK]" : "NO [FAIL]") << "\n";
-        std::cout << "[p3 test] Positions within template bounds       : " << (within_bounds         ? "YES [OK]" : "NO [FAIL]") << "\n";
+        summary.has_removal = (!rs.remove_pair_F.empty() || !rs.remove_pair_R.empty() ||
+                               !rs.remove_left.empty()   || !rs.remove_right.empty());
+
+        // Collect worst-dG entries for reporting tables (at effective threshold)
+        for (const auto* result : output_results) {
+            if (result->dg > local_threshold) continue;
+            const std::string& label = result->label;
+
+            if (label.find("_P") != std::string::npos) {
+                size_t p_pos = label.find("_P"), f_pos = label.find("_F"), r_pos = label.find("_R");
+                if (p_pos != std::string::npos && (f_pos != std::string::npos || r_pos != std::string::npos)) {
+                    try {
+                        int pair_idx = std::stoi(label.substr(p_pos + 2,
+                            (f_pos != std::string::npos ? f_pos : r_pos) - p_pos - 2));
+                        std::string direction = (f_pos != std::string::npos) ? "F" : "R";
+                        auto key = std::make_tuple((int)output_idx,
+                            "P" + std::to_string(pair_idx) + "_" + direction, pair_idx);
+                        if (!worst_pairs.count(key) || result->dg < worst_pairs[key]->dg)
+                            worst_pairs[key] = result;
+                    } catch (...) {}
+                }
+            } else if (label.find("_L") != std::string::npos || label.find("_R") != std::string::npos) {
+                char type = (label.find("_L") != std::string::npos) ? 'L' : 'R';
+                size_t type_pos = label.find(std::string("_") + type);
+                try {
+                    int idx = std::stoi(label.substr(type_pos + 2));
+                    auto key = std::make_tuple((int)output_idx, std::string(1, type), idx);
+                    if (!worst_standalone.count(key) || result->dg < worst_standalone[key]->dg)
+                        worst_standalone[key] = result;
+                } catch (...) {}
+            }
+        }
+
+        // Apply filtering
+        summary.final_pairs = 0;
+        for (size_t i = 0; i < original.pairs.size(); ++i)
+            if (!rs.remove_pair_F.count(i) && !rs.remove_pair_R.count(i)) {
+                filtered_output.pairs.push_back(original.pairs[i]);
+                summary.final_pairs++;
+            }
+
+        summary.final_left = 0;
+        for (size_t i = 0; i < original.left_oligos.size(); ++i)
+            if (!rs.remove_left.count(i)) {
+                filtered_output.left_oligos.push_back(original.left_oligos[i]);
+                summary.final_left++;
+            }
+
+        summary.final_right = 0;
+        for (size_t i = 0; i < original.right_oligos.size(); ++i)
+            if (!rs.remove_right.count(i)) {
+                filtered_output.right_oligos.push_back(original.right_oligos[i]);
+                summary.final_right++;
+            }
+
+        total_pairs_kept += summary.final_pairs;
+        total_left_kept  += summary.final_left;
+        total_right_kept += summary.final_right;
+
+        output_summaries.push_back(summary);
+        filtered_outputs[output_idx] = std::move(filtered_output);
     }
-    destroy_p3retval(res);
-    destroy_seq_args(sa);
-    p3_destroy_global_settings(test_pa);
+
+    // TABLE A1: Filtered Primer Pairs
+    if (!worst_pairs.empty()) {
+        std::cout << "\nFiltered Primer Pairs" << std::endl;
+        std::cout << std::string(73, '-') << std::endl;
+        std::cout << std::setw(8)  << "PDR pair"
+                  << std::setw(8)  << "Index"
+                  << std::setw(10) << "Direction"
+                  << std::setw(12) << "dG"
+                  << std::setw(35) << "Sequence"
+                  << std::endl;
+        std::cout << std::string(73, '-') << std::endl;
+
+        std::vector<std::pair<std::tuple<int, std::string, int>, const Result*>> sorted_pairs(
+            worst_pairs.begin(), worst_pairs.end());
+        std::sort(sorted_pairs.begin(), sorted_pairs.end(),
+            [](const auto& a, const auto& b) {
+                if (std::get<0>(a.first) != std::get<0>(b.first))
+                    return std::get<0>(a.first) < std::get<0>(b.first);
+                if (std::get<2>(a.first) != std::get<2>(b.first))
+                    return std::get<2>(a.first) < std::get<2>(b.first);
+                return std::get<1>(a.first) < std::get<1>(b.first);
+            });
+
+        for (const auto& [key, result] : sorted_pairs) {
+            int output_idx   = std::get<0>(key);
+            int pair_idx     = std::get<2>(key);
+            std::string type_dir  = std::get<1>(key);
+            std::string direction = type_dir.substr(type_dir.length() - 1);
+            std::string display_seq = result->data;
+            if (display_seq.length() > 30) display_seq = display_seq.substr(0, 27) + "...";
+
+            std::cout << std::setw(8)  << output_idx
+                      << std::setw(8)  << pair_idx
+                      << std::setw(10) << direction
+                      << std::setw(12) << std::fixed << std::setprecision(1) << result->dg
+                      << std::setw(35) << display_seq
+                      << std::endl;
+        }
+        std::cout << std::string(73, '-') << std::endl;
+    }
+
+    // TABLE A2: Filtered Standalone Primers
+    if (!worst_standalone.empty()) {
+        std::cout << "\nFiltered Oligos" << std::endl;
+        std::cout << std::string(73, '-') << std::endl;
+        std::cout << std::setw(8)  << "PDR pair"
+                  << std::setw(8)  << "Index"
+                  << std::setw(10) << "Type"
+                  << std::setw(12) << "dG"
+                  << std::setw(35) << "Sequence"
+                  << std::endl;
+        std::cout << std::string(73, '-') << std::endl;
+
+        std::vector<std::pair<std::tuple<int, std::string, int>, const Result*>> sorted_standalone(
+            worst_standalone.begin(), worst_standalone.end());
+        std::sort(sorted_standalone.begin(), sorted_standalone.end(),
+            [](const auto& a, const auto& b) {
+                if (std::get<0>(a.first) != std::get<0>(b.first))
+                    return std::get<0>(a.first) < std::get<0>(b.first);
+                if (std::get<1>(a.first) != std::get<1>(b.first))
+                    return std::get<1>(a.first) < std::get<1>(b.first);
+                return std::get<2>(a.first) < std::get<2>(b.first);
+            });
+
+        for (const auto& [key, result] : sorted_standalone) {
+            int output_idx  = std::get<0>(key);
+            std::string type = std::get<1>(key);
+            int idx          = std::get<2>(key);
+            std::string display_seq = result->data;
+            if (display_seq.length() > 30) display_seq = display_seq.substr(0, 27) + "...";
+
+            std::cout << std::setw(8)  << output_idx
+                      << std::setw(8)  << idx
+                      << std::setw(10) << type
+                      << std::setw(12) << std::fixed << std::setprecision(1) << result->dg
+                      << std::setw(35) << display_seq
+                      << std::endl;
+        }
+        std::cout << std::string(73, '-') << std::endl;
+    }
+
+    // TABLE B: Summary
+    std::cout << "\nSummary" << std::endl;
+    std::cout << std::string(80, '-') << std::endl;
+    std::cout << std::setw(8)  << "PDR pair"
+              << std::setw(18) << "Original (P/L/R)"
+              << std::setw(18) << "Removed (P/L/R)"
+              << std::setw(18) << "Final (P/L/R)"
+              << std::setw(18) << "Threshold"
+              << std::endl;
+    std::cout << std::string(80, '-') << std::endl;
+
+    size_t total_original = 0;
+    for (size_t i = 0; i < output_summaries.size(); ++i) {
+        const auto& summary = output_summaries[i];
+        total_original += summary.original_pairs + summary.original_left + summary.original_right;
+
+        std::string original_str = std::to_string(summary.original_pairs) + "/" +
+                                   std::to_string(summary.original_left)  + "/" +
+                                   std::to_string(summary.original_right);
+        std::string final_str    = std::to_string(summary.final_pairs) + "/" +
+                                   std::to_string(summary.final_left)  + "/" +
+                                   std::to_string(summary.final_right);
+        std::string removed_str  = std::to_string(summary.original_pairs - summary.final_pairs) + "/" +
+                                   std::to_string(summary.original_left  - summary.final_left)  + "/" +
+                                   std::to_string(summary.original_right - summary.final_right);
+        std::string thresh_str   = std::to_string(effective_threshold[i]);
+        if (summary.was_relaxed) thresh_str += "*"; else thresh_str += " ";
+
+        std::cout << std::setw(8)  << i
+                  << std::setw(18) << original_str
+                  << std::setw(18) << removed_str
+                  << std::setw(18) << final_str
+                  << std::setw(18) << thresh_str
+                  << std::endl;
+    }
+
+    size_t total_final = total_pairs_kept + total_left_kept + total_right_kept,
+           total_remove = total_original - total_final;
+    
+    std::cout << std::string(80, '-') << std::endl;
+    std::cout << std::setw(8)  << "TOTAL"
+              << std::setw(18) << std::to_string(total_original)
+              << std::setw(18) << std::to_string(total_remove)
+              << std::setw(18) << std::to_string(total_final)
+              << std::setw(18) << ""
+              << std::endl;
+    std::cout << std::string(80, '-') << std::endl;
+    std::cout << "* threshold auto-relaxed to preserve at least one oligo per type" << std::endl;
+
+    return filtered_outputs;
 }
 
 void print_solution(const std::vector<PrimerResult>& solution,

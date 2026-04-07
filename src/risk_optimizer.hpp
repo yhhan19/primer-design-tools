@@ -8,7 +8,9 @@ class RiskOptimizer {
                       std::vector<std::string> &data,
                       index_t len,
                       index_t min,
-                      index_t max);
+                      index_t max,
+                      double max_gc,
+                      double min_gc);
         RiskOptimizer(std::vector<risk_t> input, index_t len, index_t min, index_t max);
         ~RiskOptimizer();
         std::vector<index_t> random_search(std::size_t limit);
@@ -64,6 +66,7 @@ class RiskOptimizer {
         key_t *prev;
         index_t size, len, min, max;
         risk_t *risk, *prefix_sum;
+        double max_gc, min_gc;
         std::size_t *gc;
         std::vector<index_t> random_PDR();
         index_t greedy_random_between(index_t cmin, index_t cmax);

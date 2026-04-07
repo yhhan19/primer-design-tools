@@ -7,7 +7,9 @@ void PDRStage::run(PipelineContext& ctx) {
                      ctx.sequences, 
                      ctx.args.len_PDR, 
                      ctx.args.len_amp, 
-                     ctx.args.len_amp);
+                     ctx.args.len_amp,
+                     ctx.args.p3_max_gc / 100.0,
+                     ctx.args.p3_min_gc / 100.0);
 
     auto PDR = ro.search(0, ctx.args.u_max, ctx.args.u_min);
 
@@ -207,7 +209,7 @@ void OffTargetStage::run(PipelineContext& ctx) {
 
     write_results(ctx.args.output_file + "." + short_name(), results, labels);
 
-    ctx.filtered_primers = filterByDG(results, ctx.args.dg_thres, ctx.candidate_primers);
+    ctx.filtered_primers = filterByDG_relax(results, ctx.args.dg_thres, ctx.candidate_primers);
     // for (auto &out : ctx.filtered_primers) display_primer_output(out);
 }
 

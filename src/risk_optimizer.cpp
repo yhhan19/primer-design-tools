@@ -4,7 +4,9 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
                              std::vector<std::string> &data,
                              index_t len,
                              index_t min,
-                             index_t max) {
+                             index_t max,
+                             double max_gc,
+                             double min_gc) {
     std::vector<risk_t> input = compute_risk(data);
     std::string tmpl = msa_consensus(data);
     size = input.size();
@@ -25,6 +27,8 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
     prev = new key_t[KEY_LIMIT];
     solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
     solutions = new BST*[size];
+    this->max_gc = max_gc;
+    this->min_gc = min_gc;
 }
 
 RiskOptimizer::RiskOptimizer(std::vector<risk_t> input, 
@@ -63,7 +67,7 @@ std::size_t RiskOptimizer::gc_count(index_t p) {
 bool RiskOptimizer::gc_valid(index_t p) {
     std::size_t count = gc_count(p);
     double r = (double) count / len;
-    return r >= 0.4 && r <= 0.6;
+    return r >= min_gc && r <= max_gc;
 }
 
 RiskOptimizer::~RiskOptimizer() {
