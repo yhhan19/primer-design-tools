@@ -80,13 +80,12 @@ struct Result {
 };
 
 struct Args {
-    std::string mode;
+    // std::string mode;
 
     std::string input_file;
     std::string output_file;
     std::string ref_file;
 
-    std::size_t seed        = 42;
     std::size_t len_amp     = 420;
     std::size_t len_amp_min = 252;
     std::size_t len_PDR     = 40;
@@ -94,18 +93,30 @@ struct Args {
     double      u_min       = 0.1;
 
     std::size_t iter        = 1000;
+    std::size_t seed        = 42;
 
     std::size_t kmer_len    = 8;
-    std::size_t threshold   = 2;
+    std::size_t threshold   = 3;
     std::size_t nthreads    = 8;
     std::size_t block_size  = 1 << 27;
     std::size_t chunk_size  = (std::size_t) 1e8;
 
-    double      dg_thres    = 1e8;
+    std::size_t p3_opt_size = 20;
+    std::size_t p3_min_size = 18;
+    std::size_t p3_max_size = 25;
+    double      p3_opt_tm   = 60.0;
+    double      p3_min_tm   = 57.0;
+    double      p3_max_tm   = 63.0;
+    double      p3_min_gc   = 40.0;
+    double      p3_max_gc   = 60.0;
+    std::size_t num_return  = 10;
+
     double      mv          = 50.0;
     double      dv          = 1.5;
     double      dntp        = 0.6;
     double      dna_conc    = 200.0;
+    
+    double      dg_thres    = -12000;
     double      temp        = 37.0;
 
     bool        help        = false;
@@ -119,6 +130,7 @@ struct PipelineContext {
     std::vector<PrimerOutput> candidate_primers, filtered_primers;
     std::vector<index_t>      dimer_solution;
     std::vector<Result>       off_target_hits;
+    std::vector<PrimerResult> solution_primers;
 };
 
 std::size_t read_fasta(const std::string& file_name,
@@ -184,3 +196,8 @@ std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
 std::vector<PrimerOutput> filterByDG_debug(const std::vector<Result>& results,
                                            double dg_threshold,
                                            const std::vector<PrimerOutput>& original_primers);
+
+void test_primer3_orientation(p3_global_settings* pa);
+
+void print_solution(const std::vector<PrimerResult>& solution,
+                    const std::vector<index_t>& pdrs);

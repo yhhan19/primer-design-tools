@@ -29,19 +29,19 @@ void PrimerSelStage::run(PipelineContext& ctx) {
 
     // --- 1. Global settings ---
     p3_global_settings *pa = p3_create_global_settings();
-    p3_set_gs_primer_opt_size(pa, 20);
-    p3_set_gs_primer_min_size(pa, 18);
-    p3_set_gs_primer_max_size(pa, 25);
-    p3_set_gs_primer_opt_tm(pa, 60.0);
-    p3_set_gs_primer_min_tm(pa, 57.0);
-    p3_set_gs_primer_max_tm(pa, 63.0);
-    p3_set_gs_primer_min_gc(pa, 40.0);
-    p3_set_gs_primer_max_gc(pa, 60.0);
+    p3_set_gs_primer_opt_size(pa, ctx.args.p3_opt_size);
+    p3_set_gs_primer_min_size(pa, ctx.args.p3_min_size);
+    p3_set_gs_primer_max_size(pa, ctx.args.p3_max_size);
+    p3_set_gs_primer_opt_tm(pa, ctx.args.p3_opt_tm);
+    p3_set_gs_primer_min_tm(pa, ctx.args.p3_min_tm);
+    p3_set_gs_primer_max_tm(pa, ctx.args.p3_max_tm);
+    p3_set_gs_primer_min_gc(pa, ctx.args.p3_min_gc);
+    p3_set_gs_primer_max_gc(pa, ctx.args.p3_max_gc);
 
-    pa->p_args.salt_conc     = 50.0;
-    pa->p_args.divalent_conc = 1.5;
-    pa->p_args.dntp_conc     = 0.6;
-    pa->p_args.dna_conc      = 50.0;
+    pa->p_args.salt_conc     = ctx.args.mv;
+    pa->p_args.divalent_conc = ctx.args.dv;
+    pa->p_args.dntp_conc     = ctx.args.dntp;
+    pa->p_args.dna_conc      = ctx.args.dna_conc;
 
     pa->pr_min[0] = ctx.args.len_amp_min;
     pa->pr_max[0] = ctx.args.len_amp + ctx.args.len_PDR;
@@ -50,7 +50,7 @@ void PrimerSelStage::run(PipelineContext& ctx) {
     pa->pick_left_primer    = 1;
     pa->pick_right_primer   = 1;
     pa->pick_internal_oligo = 0;
-    pa->num_return          = 10;
+    pa->num_return          = ctx.args.num_return;
 
     std::cout << "Product size: [" << pa->pr_min[0] 
               << ", " << pa->pr_max[0] << "] bp"
@@ -99,6 +99,8 @@ void PrimerSelStage::run(PipelineContext& ctx) {
             std::cerr << "Sequence error: " 
                       << retval->per_sequence_err.data << "\n";
 
+        ctx.candidate_primers.push_back(extract_all(retval, sa));
+
         int n_pairs = retval->best_pairs.num_pairs;
         std::string range = "[" + std::to_string(ctx.pdr_regions[i]) +
                             ", " + std::to_string(ctx.pdr_regions[i+1]) + "]";
@@ -108,9 +110,63 @@ void PrimerSelStage::run(PipelineContext& ctx) {
                   << std::setw(10) << retval->fwd.num_elem
                   << std::setw(10) << retval->rev.num_elem
                   << std::setw(10) << n_pairs
+                  /*
+                  << ctx.tmpl.substr(sa->ok_regions.left_pairs[0][0], sa->ok_regions.left_pairs[0][1]) << " "
+                  << ctx.tmpl.substr(sa->ok_regions.right_pairs[0][0], sa->ok_regions.right_pairs[0][1]) << " "
+                  << ctx.candidate_primers[region_idx].left_oligos[0].seq << " "
+                  << ctx.candidate_primers[region_idx].right_oligos[0].seq << " "
+                  */
                   << "\n";
+        
+        // print pair details
+        /*
+        if (n_pairs > 0) {
+            std::cout << std::string(TW, ' ')
+                      << "  " 
+                      << std::setw(6)  << "pair"
+                      << std::setw(28) << "left seq"
+                      << std::setw(7)  << "Tm"
+                      << std::setw(7)  << "GC%"
+                      << std::setw(28) << "right seq"
+                      << std::setw(7)  << "Tm"
+                      << std::setw(7)  << "GC%"
+                      << std::setw(7)  << "size"
+                      << std::setw(8)  << "ΔTm"
+                      << "\n";
 
-        ctx.candidate_primers.push_back(extract_all(retval, sa));
+            for (int pi = 0; pi < n_pairs; pi++) {
+                const primer_rec* left  = retval->best_pairs.pairs[pi].left;
+                const primer_rec* right = retval->best_pairs.pairs[pi].right;
+
+                int lstart  = left->start;
+                int llen    = left->length;
+                int r3prime = right->start;
+                int rstart  = r3prime - right->length + 1;
+                int rlen    = right->length;
+                int psize   = r3prime - lstart + 1;
+
+                std::string lseq(sa->trimmed_seq + lstart, llen);
+                std::string rseq(sa->trimmed_seq + rstart, rlen);
+
+                double dtm = std::fabs(left->temp - right->temp);
+
+                std::cout << std::string(TW, ' ')
+                          << "  "
+                          << std::setw(6)  << pi
+                          << std::setw(28) << lseq
+                          << std::setw(7)  << std::fixed << std::setprecision(1) << left->temp
+                          << std::setw(7)  << std::fixed << std::setprecision(1) << left->gc_content
+                          << std::setw(28) << rseq
+                          << std::setw(7)  << std::fixed << std::setprecision(1) << right->temp
+                          << std::setw(7)  << std::fixed << std::setprecision(1) << right->gc_content
+                          << std::setw(7)  << psize
+                          << std::setw(8)  << std::fixed << std::setprecision(2) << dtm
+                          << "\n";
+            }
+            std::cout << "\n";
+        }
+        */
+
         destroy_p3retval(retval);
     }
 
@@ -120,23 +176,6 @@ void PrimerSelStage::run(PipelineContext& ctx) {
 
     destroy_seq_args(sa);
     p3_destroy_global_settings(pa);
-}
-
-void DimerStage::run(PipelineContext& ctx) {
-    srand(ctx.args.seed);
-
-    Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 
-        ctx.args.mv, 
-        ctx.args.dv, 
-        ctx.args.dntp, 
-        ctx.args.dna_conc, 
-        ctx.args.temp);
-
-    KPartiteGraph g(ctx.filtered_primers);
-    auto solution = g.solve_fast(ctx.args.iter);
-    std::cout << "loss: " << g.cost(solution) << std::endl;
-
-    ctx.dimer_solution = solution;
 }
 
 void OffTargetStage::run(PipelineContext& ctx) {
@@ -168,8 +207,38 @@ void OffTargetStage::run(PipelineContext& ctx) {
 
     write_results(ctx.args.output_file + "." + short_name(), results, labels);
 
-    ctx.filtered_primers = filterByDG(results, -18000, ctx.candidate_primers);
+    ctx.filtered_primers = filterByDG(results, ctx.args.dg_thres, ctx.candidate_primers);
     // for (auto &out : ctx.filtered_primers) display_primer_output(out);
+}
+
+void DimerStage::run(PipelineContext& ctx) {
+    srand(ctx.args.seed);
+
+    Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 
+        ctx.args.mv, 
+        ctx.args.dv, 
+        ctx.args.dntp, 
+        ctx.args.dna_conc, 
+        ctx.args.temp);
+
+    KPartiteGraph g(ctx.filtered_primers);
+    auto solution = g.solve_fast(ctx.args.iter);
+    std::cout << "loss: " << g.cost(solution) << std::endl;
+
+    ctx.dimer_solution = solution;
+
+    for (std::size_t amp = 0; amp < ctx.filtered_primers.size(); amp++) {
+        index_t left_n  = solution[amp * 2];      // part k=amp*2   -> left oligos
+        index_t right_n = solution[amp * 2 + 1];  // part k=amp*2+1 -> right oligos
+
+        const PrimerOutput& po = ctx.filtered_primers[amp];
+        PrimerResult result;
+        result.left        = po.left_oligos[left_n];
+        result.right       = po.right_oligos[right_n];
+        result.product_size = result.right.start - result.left.start + result.right.length;
+
+        ctx.solution_primers.push_back(result);
+    }
 }
 
 void Pipeline::run(PipelineContext& ctx) {

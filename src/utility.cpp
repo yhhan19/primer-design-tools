@@ -699,7 +699,7 @@ std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
     }
     
     // TABLE B: Summary by output
-    std::cout << "\nOutput Summary" << std::endl;
+    std::cout << "\nSummary" << std::endl;
     std::cout << std::string(62, '-') << std::endl;
     std::cout << std::setw(8) << "PDR pair"
               << std::setw(18) << "Original (P/L/R)"
@@ -753,4 +753,166 @@ std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
     std::cout << std::string(62, '-') << std::endl;
     
     return filtered_outputs;
+}
+
+void test_primer3_orientation(p3_global_settings* pa) {
+    const std::string tmpl =
+        "GCTAGCTAGCTAGCTAGCTAGCTAGC"
+        "ATCGATCGATCGATCGATCGATCGAT"
+        "ATCGATCGATCGATCGATCGATCGAT"
+        "ATCGATCGATCGATCGATCGATCGAT"
+        "CTAGCTAGCTAGCTAGCTAGCTAGCT";
+
+    seq_args* sa        = create_seq_arg();
+    sa->sequence        = strdup(tmpl.c_str());
+    sa->incl_s          = 0;
+    sa->incl_l          = tmpl.size();
+    sa->start_codon_pos = PR_DEFAULT_START_CODON_POS;
+
+    p3_global_settings* test_pa = p3_create_global_settings();
+    p3_set_gs_primer_opt_size(test_pa, 18);
+    p3_set_gs_primer_min_size(test_pa, 15);
+    p3_set_gs_primer_max_size(test_pa, 27);
+    p3_set_gs_primer_opt_tm(test_pa, 55.0);
+    p3_set_gs_primer_min_tm(test_pa, 40.0);
+    p3_set_gs_primer_max_tm(test_pa, 70.0);
+    p3_set_gs_primer_min_gc(test_pa, 10.0);
+    p3_set_gs_primer_max_gc(test_pa, 90.0);
+    test_pa->pr_min[0]           = 30;
+    test_pa->pr_max[0]           = tmpl.size();
+    test_pa->num_intervals       = 1;
+    test_pa->pick_left_primer    = 1;
+    test_pa->pick_right_primer   = 1;
+    test_pa->pick_internal_oligo = 0;
+    test_pa->num_return          = 1;
+
+    // dump what primer3 sees
+    std::cout << "[p3 test] Template length : " << tmpl.size() << "\n";
+    std::cout << "[p3 test] Template        : " << tmpl        << "\n";
+    std::cout << "[p3 test] pr_min          : " << test_pa->pr_min[0] << "\n";
+    std::cout << "[p3 test] pr_max          : " << test_pa->pr_max[0] << "\n";
+
+    p3retval* res = choose_primers(test_pa, sa);
+
+    // print all warnings and errors from primer3
+    if (res) {
+        if (res->warnings.data)
+            std::cout << "[p3 test] warnings : " << res->warnings.data << "\n";
+        if (res->glob_err.data)
+            std::cout << "[p3 test] glob_err : " << res->glob_err.data << "\n";
+        if (res->per_sequence_err.data)
+            std::cout << "[p3 test] seq_err  : " << res->per_sequence_err.data << "\n";
+
+        std::cout << "[p3 test] num_pairs : " << res->best_pairs.num_pairs << "\n";
+    } else {
+        std::cout << "[p3 test] res is null\n";
+    }
+
+    if (res->best_pairs.num_pairs > 0) {
+        const primer_rec* left  = res->best_pairs.pairs[0].left;
+        const primer_rec* right = res->best_pairs.pairs[0].right;
+
+        int lstart = left->start;
+        int llen   = left->length;
+        int rstart = right->start;
+        int rlen   = right->length;
+
+        // reconstruct from trimmed_seq
+        std::string lseq_p3(sa->trimmed_seq + lstart, llen);
+        std::string rseq_p3(sa->trimmed_seq + rstart, rlen);
+
+        // 3' end of right primer on top strand
+        int r3prime = rstart + rlen - 1;
+
+        // amplicon
+        int amp_len  = r3prime - lstart + 1;
+        std::string amplicon = tmpl.substr(lstart, amp_len);
+
+        std::cout << "[p3 test] lstart         : " << lstart  << "\n";
+        std::cout << "[p3 test] rstart         : " << rstart  << "\n";
+        std::cout << "[p3 test] r3prime        : " << r3prime << "\n";
+        std::cout << "[p3 test] amp_len        : " << amp_len << "\n\n";
+
+        std::cout << "[p3 test] Left  p3 seq   : " << lseq_p3 << "\n";
+        std::cout << "[p3 test] Right p3 seq   : " << rseq_p3 << "\n\n";
+
+        std::cout << "[p3 test] Amplicon       : " << amplicon << "\n\n";
+
+        // sanity checks
+        // 1. left primer at start of amplicon
+        bool amp_starts_with_left = amplicon.substr(0, llen) == lseq_p3;
+
+        // 2. right primer 3' end is at end of amplicon
+        //    revcomp of right should be at end of amplicon
+        bool amp_ends_with_right  = amplicon.substr(amp_len - rlen, rlen) == revcomp(rseq_p3);
+
+        // 3. right primer should be to the RIGHT of left primer
+        bool right_is_right       = rstart > lstart + llen;
+
+        // 4. positions within template bounds
+        bool within_bounds        = lstart >= 0 && r3prime < (int)tmpl.size();
+
+        std::cout << "[p3 test] Amplicon starts with left primer       : " << (amp_starts_with_left ? "YES [OK]" : "NO [FAIL]") << "\n";
+        std::cout << "[p3 test] Amplicon ends with revcomp(right)      : " << (amp_ends_with_right  ? "YES [OK]" : "NO [FAIL]") << "\n";
+        std::cout << "[p3 test] Right primer is right of left          : " << (right_is_right       ? "YES [OK]" : "NO [FAIL]") << "\n";
+        std::cout << "[p3 test] Positions within template bounds       : " << (within_bounds         ? "YES [OK]" : "NO [FAIL]") << "\n";
+    }
+    destroy_p3retval(res);
+    destroy_seq_args(sa);
+    p3_destroy_global_settings(test_pa);
+}
+
+void print_solution(const std::vector<PrimerResult>& solution,
+                    const std::vector<index_t>& pdrs) {
+    const int W_IDX  = 6;
+    const int W_PDR  = 16;
+    const int W_SEQ  = 28;
+    const int W_TM   = 7;
+    const int W_GC   = 7;
+    const int W_SIZE = 7;
+    const int W_DG   = 0;
+    const int TOTAL  = W_IDX + W_PDR + W_SEQ*2 + W_TM*2 + W_GC*2 + W_SIZE + W_DG + 2;
+
+    std::cout << "\nSolution Primers\n"
+              << std::string(TOTAL, '-') << "\n"
+              << std::right
+              << std::setw(W_IDX)  << "idx"
+              << std::setw(W_PDR)  << "PDR"
+              << std::setw(W_SEQ)  << "left seq"
+              << std::setw(W_TM)   << "Tm"
+              << std::setw(W_GC)   << "GC%"
+              << std::setw(W_SEQ)  << "right seq"
+              << std::setw(W_TM)   << "Tm"
+              << std::setw(W_GC)   << "GC%"
+              << std::setw(W_SIZE) << "size"
+              // << std::setw(W_DG)   << "dG"
+              << "\n"
+              << std::string(TOTAL, '-') << "\n";
+
+    for (std::size_t i = 0; i < solution.size(); i++) {
+        const PrimerResult& r = solution[i];
+
+        std::string pdr_str = "[" + std::to_string(pdrs[i * 2]) 
+                            + ", " + std::to_string(pdrs[i * 2 + 1]) + "]";
+
+        // truncate sequences if too long
+        auto trunc = [&](const std::string& s, int w) {
+            return s.size() <= (std::size_t)w ? s : s.substr(0, w - 2) + "..";
+        };
+
+        std::cout << std::right
+                  << std::setw(W_IDX)  << i
+                  << std::setw(W_PDR)  << pdr_str
+                  << std::setw(W_SEQ)  << trunc(r.left.seq,  W_SEQ)
+                  << std::setw(W_TM)   << std::fixed << std::setprecision(1) << r.left.tm
+                  << std::setw(W_GC)   << std::fixed << std::setprecision(1) << r.left.gc
+                  << std::setw(W_SEQ)  << trunc(r.right.seq, W_SEQ)
+                  << std::setw(W_TM)   << std::fixed << std::setprecision(1) << r.right.tm
+                  << std::setw(W_GC)   << std::fixed << std::setprecision(1) << r.right.gc
+                  << std::setw(W_SIZE) << r.product_size
+                  // << std::setw(W_DG)   << std::fixed << std::setprecision(1) << r.dimer_dg
+                  << "\n";
+    }
+
+    std::cout << std::string(TOTAL, '-') << "\n\n";
 }

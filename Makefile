@@ -4,6 +4,8 @@ PRIMER3  ?= ./primer3
 CXXFLAGS := -O3 -std=c++17 -I$(PRIMER3)/src -pthread \
             -DPRIMER3_PATH=\"$(PRIMER3)\"
 
+DEPFLAGS  = -MMD -MP
+
 P3_OBJS := \
     $(PRIMER3)/src/libprimer3.o    \
     $(PRIMER3)/src/thal_primer.o   \
@@ -26,6 +28,7 @@ TARGET := $(BIN_DIR)/dpro
 
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+DEPS := $(OBJS:.o=.d)
 
 all: $(TARGET)
 
@@ -33,7 +36,9 @@ $(TARGET): $(OBJS) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $^ $(P3_OBJS) -o $@ $(LDLIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(DEPS)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)

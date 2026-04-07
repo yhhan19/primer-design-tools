@@ -28,7 +28,7 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
             if (part(i) != part(j) && get_oligo(i) && get_oligo(j))
                 total_edges++;
 
-const int TW = 14 + 4 + 10 + 6; // = 34
+    const int TW = 14 + 4 + 10 + 6; // = 34
     std::cout << "K = " << K << " N = " << N
               << " nodes = " << K * N << "\n"
               << "edges to compute = " << total_edges << "\n\n"
@@ -51,16 +51,16 @@ const int TW = 14 + 4 + 10 + 6; // = 34
     std::size_t next  = step;
 
     for (index_t i = 0; i < K * N; i++) {
-        for (index_t j = i; j < K * N; j++) {
+        for (index_t j = i + 1; j < K * N; j++) {
             if (part(i) == part(j)) {
                 graph[i][j] = graph[j][i] = 0;
                 continue;
             }
-            graph[i][j] = graph[j][i] = INF;
+            graph[i][j] = graph[j][i] = -1e6;
             const Oligo* oi = get_oligo(i);
             const Oligo* oj = get_oligo(j);
             if (oi && oj) {
-                graph[i][j] = graph[j][i] = 
+                graph[i][j] = graph[j][i] = // - (weight_t) (rand() % 20000);
                     Thal::compute_dimer_dg(oi->seq, oj->seq);
                 count++;
                 if (count >= next) {
@@ -188,6 +188,13 @@ weight_t KPartiteGraph::dfs(index_t k, index_t *solution, std::size_t *count) {
     }
 }
 
+std::vector<index_t> KPartiteGraph::solve_trivial() {
+    std::vector<index_t> solution;
+    for (index_t i = 0; i < K; i ++) 
+        solution.push_back(0);
+    return solution;
+}
+
 std::vector<index_t> KPartiteGraph::solve_fast(std::size_t iter) {
     return random_search_single_fast(iter);
 }
@@ -291,14 +298,14 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
     weight_t global_best = std::numeric_limits<weight_t>::lowest();
 
     std::cout << "Random search: " << restarts << " restarts\n"
-              << std::string(55, '-') << "\n"
+              << std::string(51, '-') << "\n"
               << std::right
               << std::setw(10) << "restart"
               << std::setw(15) << "local_opt"
               << std::setw(15) << "global_best"
               << std::setw(8)  << "moves"
               << "\n"
-              << std::string(55, '-') << "\n";
+              << std::string(51, '-') << "\n";
 
     for (std::size_t r = 0; r < restarts; ++r) {
         for (int p = 0; p < (int)K; ++p) solution[p] = random_between(0, N - 1);
@@ -329,6 +336,7 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
             solution[best_p] = best_n;
             const index_t new_v = gv(best_p);
             current += best_gain;
+
             moves++;
 
             for (int q = 0; q < (int)K; ++q) if (q != best_p)
@@ -363,11 +371,12 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
                       << std::setw(15) << global_best
                       << std::setw(8)  << moves
                       << (improved ? "  *" : "")
+                      // << cost(best_solution) << " "
                       << "\n";
         }
     }
 
-    std::cout << std::string(55, '-') << "\n"
+    std::cout << std::string(51, '-') << "\n"
               << "Best solution: " << global_best << "\n";
 
     return best_solution;

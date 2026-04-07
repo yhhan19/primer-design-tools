@@ -18,6 +18,8 @@ class KPartiteGraph {
         weight_t solve(std::size_t iter);
         std::vector<index_t> solve_fast(std::size_t iter);
         weight_t solve_sa(std::size_t iter);
+        index_t get_N() { return N; }
+        std::vector<index_t> solve_trivial();
     private:
         weight_t *vertices;
         weight_t **graph, **opt_graph, **opt_graph_2;
