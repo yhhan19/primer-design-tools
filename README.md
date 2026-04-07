@@ -77,18 +77,18 @@ The executable will be generated as `bin/dpro`.
 ### Basic Pipeline Analysis
 ```bash
 # Complete pipeline with reference genome screening
-./bin/dpro all \
+./bin/dpro \
   -i sequences.fasta \
   -o results/ \
   -r reference_genome.fna
 
 # Pipeline without off-target screening
-./bin/dpro all \
+./bin/dpro \
   -i sequences.fasta \
   -o results/
 
 # Custom parameters for stringent filtering
-./bin/dpro all \
+./bin/dpro \
   -i sequences.fasta \
   -o results/ \
   -r genome.fna \
