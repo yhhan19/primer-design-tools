@@ -8,8 +8,7 @@ void PDRStage::run(PipelineContext& ctx) {
                      ctx.args.len_PDR, 
                      ctx.args.len_amp, 
                      ctx.args.len_amp,
-                     ctx.args.p3_max_gc / 100.0,
-                     ctx.args.p3_min_gc / 100.0);
+                     ctx.args);
 
     auto PDR = ro.search(0, ctx.args.u_max, ctx.args.u_min);
 
@@ -112,62 +111,7 @@ void PrimerSelStage::run(PipelineContext& ctx) {
                   << std::setw(10) << retval->fwd.num_elem
                   << std::setw(10) << retval->rev.num_elem
                   << std::setw(10) << n_pairs
-                  /*
-                  << ctx.tmpl.substr(sa->ok_regions.left_pairs[0][0], sa->ok_regions.left_pairs[0][1]) << " "
-                  << ctx.tmpl.substr(sa->ok_regions.right_pairs[0][0], sa->ok_regions.right_pairs[0][1]) << " "
-                  << ctx.candidate_primers[region_idx].left_oligos[0].seq << " "
-                  << ctx.candidate_primers[region_idx].right_oligos[0].seq << " "
-                  */
                   << "\n";
-        
-        // print pair details
-        /*
-        if (n_pairs > 0) {
-            std::cout << std::string(TW, ' ')
-                      << "  " 
-                      << std::setw(6)  << "pair"
-                      << std::setw(28) << "left seq"
-                      << std::setw(7)  << "Tm"
-                      << std::setw(7)  << "GC%"
-                      << std::setw(28) << "right seq"
-                      << std::setw(7)  << "Tm"
-                      << std::setw(7)  << "GC%"
-                      << std::setw(7)  << "size"
-                      << std::setw(8)  << "ΔTm"
-                      << "\n";
-
-            for (int pi = 0; pi < n_pairs; pi++) {
-                const primer_rec* left  = retval->best_pairs.pairs[pi].left;
-                const primer_rec* right = retval->best_pairs.pairs[pi].right;
-
-                int lstart  = left->start;
-                int llen    = left->length;
-                int r3prime = right->start;
-                int rstart  = r3prime - right->length + 1;
-                int rlen    = right->length;
-                int psize   = r3prime - lstart + 1;
-
-                std::string lseq(sa->trimmed_seq + lstart, llen);
-                std::string rseq(sa->trimmed_seq + rstart, rlen);
-
-                double dtm = std::fabs(left->temp - right->temp);
-
-                std::cout << std::string(TW, ' ')
-                          << "  "
-                          << std::setw(6)  << pi
-                          << std::setw(28) << lseq
-                          << std::setw(7)  << std::fixed << std::setprecision(1) << left->temp
-                          << std::setw(7)  << std::fixed << std::setprecision(1) << left->gc_content
-                          << std::setw(28) << rseq
-                          << std::setw(7)  << std::fixed << std::setprecision(1) << right->temp
-                          << std::setw(7)  << std::fixed << std::setprecision(1) << right->gc_content
-                          << std::setw(7)  << psize
-                          << std::setw(8)  << std::fixed << std::setprecision(2) << dtm
-                          << "\n";
-            }
-            std::cout << "\n";
-        }
-        */
 
         destroy_p3retval(retval);
     }
@@ -209,7 +153,7 @@ void OffTargetStage::run(PipelineContext& ctx) {
 
     write_results(ctx.args.output_file + "." + short_name(), results, labels);
 
-    ctx.filtered_primers = filterByDG_relax(results, ctx.args.dg_thres, ctx.candidate_primers);
+    ctx.filtered_primers = filterByDG_relax(results, ctx.args.dg_thres, ctx.candidate_primers, ctx.args.num_return);
     // for (auto &out : ctx.filtered_primers) display_primer_output(out);
 }
 
@@ -224,14 +168,62 @@ void DimerStage::run(PipelineContext& ctx) {
         ctx.args.temp);
 
     KPartiteGraph g(ctx.filtered_primers);
-    auto solution = g.solve_fast(ctx.args.iter);
-    std::cout << "loss: " << g.cost(solution) << std::endl;
 
-    ctx.dimer_solution = solution;
+    using Clock = std::chrono::steady_clock;
+    using Ms    = std::chrono::milliseconds;
+
+    struct Result {
+        std::string          name;
+        std::vector<index_t> solution;
+        long                 ms;
+        weight_t             cost;
+    };
+
+    auto timed_run = [&](const std::string& name, auto fn) -> Result {
+        auto t0  = Clock::now();
+        auto sol = fn();
+        auto ms  = std::chrono::duration_cast<Ms>(Clock::now() - t0).count();
+        return { name, sol, ms, g.cost(sol) };
+    };
+
+    std::vector<Result> results = {
+        timed_run("Random Search", [&]{ return g.solve_fast(ctx.args.iter * 10);    }),
+        timed_run("SA",            [&]{ return g.solve_sa(ctx.args.iter);             }),
+        timed_run("Tabu Search",   [&]{ return g.solve_tabu(100, ctx.args.iter);  }),
+        timed_run("Genetic",       [&]{ return g.solve_ga(1000, ctx.args.iter * 10, 0.05); }),
+    };
+
+    // summary table
+    const int TW = 16 + 14 + 10 + 10;
+    std::cout << "\n" << std::string(TW, '-') << "\n"
+              << std::left  << std::setw(16) << "Algorithm"
+              << std::right << std::setw(14) << "Cost"
+                            << std::setw(10) << "Time(ms)"
+                            << std::setw(10) << "Winner"
+              << "\n" << std::string(TW, '-') << "\n";
+
+    auto& winner = *std::max_element(results.begin(), results.end(),
+        [](const Result& a, const Result& b){ return a.cost < b.cost; });
+
+    for (auto& r : results) {
+        std::cout << std::left  << std::setw(16) << r.name
+                  << std::right << std::fixed << std::setprecision(4)
+                                << std::setw(14) << r.cost
+                                << std::setw(10) << r.ms
+                                << std::setw(10) << (&r == &winner ? "✓" : "")
+                  << "\n";
+    }
+
+    std::cout << std::string(TW, '-') << "\n"
+              << " Winner: " << winner.name 
+              << "  cost=" << winner.cost
+              << "  (" << winner.ms << " ms)\n";
+
+    ctx.dimer_solution = results[0].solution;
 
     for (std::size_t amp = 0; amp < ctx.filtered_primers.size(); amp++) {
-        index_t left_n  = solution[amp * 2];      // part k=amp*2   -> left oligos
-        index_t right_n = solution[amp * 2 + 1];  // part k=amp*2+1 -> right oligos
+        index_t left_n  = ctx.dimer_solution[amp * 2];
+        index_t right_n = ctx.dimer_solution[amp * 2 + 1];
 
         const PrimerOutput& po = ctx.filtered_primers[amp];
         PrimerResult result;

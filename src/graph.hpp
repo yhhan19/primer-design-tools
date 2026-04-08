@@ -17,7 +17,9 @@ class KPartiteGraph {
         weight_t cost(std::vector<index_t> solution);
         weight_t solve(std::size_t iter);
         std::vector<index_t> solve_fast(std::size_t iter);
-        weight_t solve_sa(std::size_t iter);
+        std::vector<index_t> solve_sa(std::size_t iter);
+        std::vector<index_t> solve_tabu(std::size_t restarts, std::size_t iterations);
+        std::vector<index_t> solve_ga(std::size_t pop_size, std::size_t generations, double mutation_rate);
         index_t get_N() { return N; }
         std::vector<index_t> solve_trivial();
     private:
@@ -31,5 +33,7 @@ class KPartiteGraph {
         weight_t random_search(std::size_t iter);
         std::vector<index_t> random_search_single_fast(std::size_t restarts);
         std::vector<index_t> beam_search_fast(std::size_t beam_width, std::size_t max_iters);
-        weight_t simulated_annealing(std::size_t restarts);
+        std::vector<index_t> simulated_annealing(std::size_t restarts);
+        std::vector<index_t> tabu_search(std::size_t restarts, std::size_t iterations);
+        std::vector<index_t> genetic_algorithm(std::size_t pop_size, std::size_t generations, double mutation_rate);
 };

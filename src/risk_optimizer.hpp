@@ -9,8 +9,7 @@ class RiskOptimizer {
                       index_t len,
                       index_t min,
                       index_t max,
-                      double max_gc,
-                      double min_gc);
+                      const Args &args);
         RiskOptimizer(std::vector<risk_t> input, index_t len, index_t min, index_t max);
         ~RiskOptimizer();
         std::vector<index_t> random_search(std::size_t limit);
@@ -46,8 +45,8 @@ class RiskOptimizer {
         
         // Risk weights structure
         struct RiskWeights {
-            double diversity = 0.5;
-            double gaps = 0.0;
+            double diversity = 1.0;
+            double gaps = 1.0;
             double ambiguity = 0.0;
             double entropy = 0.0;
             double conservation = 0.0;
@@ -57,23 +56,27 @@ class RiskOptimizer {
             double tm_stability = 0.0;
             double secondary_structure = 0.0;
         };
-
+        
+        std::string tmpl;
         std::unordered_map<key_t, risk_t> memo_umap;
         std::unordered_map<key_t, key_t> prev_umap;
         std::vector<std::pair<index_t, risk_t>> *solution_vector;
+        std::vector<index_t> valid_results;
         BST **solutions;
         risk_t *memo;
         key_t *prev;
         index_t size, len, min, max;
         risk_t *risk, *prefix_sum;
-        double max_gc, min_gc;
         std::size_t *gc;
+        Args args;
+        std::vector<index_t> valid_counts_all_pdrs(std::size_t num_threads);
         std::vector<index_t> random_PDR();
         index_t greedy_random_between(index_t cmin, index_t cmax);
         risk_t opt(index_t f, index_t r, index_t pf, index_t pr, risk_t u, risk_t alpha);
         risk_t cost(index_t p, risk_t u, risk_t alpha);
-        std::size_t gc_count(index_t p);
+        std::size_t gc_count(index_t p, index_t l);
         bool gc_valid(index_t p);
+        index_t valid_count_in_pdr(index_t pdr_start);
         risk_t top_k_opt(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t opt_m(index_t f, index_t r, risk_t u, risk_t alpha);

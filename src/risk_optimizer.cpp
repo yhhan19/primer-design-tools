@@ -5,10 +5,9 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
                              index_t len,
                              index_t min,
                              index_t max,
-                             double max_gc,
-                             double min_gc) {
+                             const Args &args) {
     std::vector<risk_t> input = compute_risk(data);
-    std::string tmpl = msa_consensus(data);
+    this->tmpl = msa_consensus(data);
     size = input.size();
     risk = new risk_t[size];
     prefix_sum = new risk_t[size + 1];
@@ -27,8 +26,8 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
     prev = new key_t[KEY_LIMIT];
     solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
     solutions = new BST*[size];
-    this->max_gc = max_gc;
-    this->min_gc = min_gc;
+    this->args = args;
+    valid_results = valid_counts_all_pdrs(4);
 }
 
 RiskOptimizer::RiskOptimizer(std::vector<risk_t> input, 
@@ -59,15 +58,89 @@ risk_t RiskOptimizer::cost(index_t p, risk_t u, risk_t alpha) {
     return sum2 + u * alpha;
 }
 
-std::size_t RiskOptimizer::gc_count(index_t p) {
-    std::size_t count = gc[p + len] - gc[p];
+std::size_t RiskOptimizer::gc_count(index_t p, index_t l) {
+    std::size_t count = gc[p + l] - gc[p];
     return count;
 }
 
+index_t RiskOptimizer::valid_count_in_pdr(index_t pdr_start) {
+    index_t valid_count = 0;
+    for (std::size_t pl = args.p3_min_size; pl <= args.p3_max_size; ++pl) {
+        for (index_t p = pdr_start; p + pl < pdr_start + len; ++p) {
+
+            double r = (double) gc_count(p, pl) / pl * 100;
+            if (r < args.p3_min_gc || r > args.p3_max_gc) continue;
+
+            std::string primer_seq = tmpl.substr(p, pl);
+
+            tm_ret tm_result = oligotm(
+                primer_seq.c_str(),
+                args.dna_conc,
+                args.mv,
+                args.dv,
+                args.dntp,
+                0.0,
+                0.6,
+                0.0,
+                santalucia_auto,
+                santalucia,
+                -10.0
+            );
+
+            if (tm_result.Tm < args.p3_min_tm || tm_result.Tm > args.p3_max_tm) continue;
+
+            ++ valid_count;
+        }
+    }
+    return valid_count;
+}
+
 bool RiskOptimizer::gc_valid(index_t p) {
-    std::size_t count = gc_count(p);
-    double r = (double) count / len;
-    return r >= min_gc && r <= max_gc;
+    index_t count = valid_results[p];
+    return count >= args.num_return;
+}
+
+std::vector<index_t> RiskOptimizer::valid_counts_all_pdrs(std::size_t num_threads)
+{
+    if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
+
+    std::cout << "Validating PDRs...\n";
+
+    if (tmpl.size() < len) {
+        std::cerr << "  ERROR: template shorter than PDR length\n";
+        return {};
+    }
+
+    std::size_t num_pdrs = tmpl.size() - len;
+    std::size_t chunk    = (num_pdrs + num_threads - 1) / num_threads;
+    std::vector<index_t> results(num_pdrs);
+    std::vector<std::future<void>> futures;
+
+    for (std::size_t t = 0; t < num_threads; ++t) {
+        std::size_t start = t * chunk;
+        std::size_t end   = std::min(start + chunk, num_pdrs);
+        if (start >= end) break;
+
+        futures.push_back(std::async(std::launch::async,
+            [this, &results, start, end]() {
+                for (std::size_t i = start; i < end; ++i)
+                    results[i] = valid_count_in_pdr(i);
+            }
+        ));
+    }
+    for (auto& f : futures) f.get();
+
+    index_t     min_c    = *std::min_element(results.begin(), results.end());
+    index_t     max_c    = *std::max_element(results.begin(), results.end());
+    double      avg_c    = (double) std::accumulate(results.begin(), results.end(), 0ULL) / num_pdrs;
+    std::size_t zero_cnt = std::count(results.begin(), results.end(), 0);
+
+    std::cout << "Total PDRs             : " << num_pdrs << "\n"
+              << "Valid count min/avg/max : " << min_c << " / " << avg_c << " / " << max_c << "\n"
+              << "PDRs with 0 valid      : " << zero_cnt
+              << "(" << (100.0 * zero_cnt / num_pdrs) << " %)\n\n";
+
+    return results;
 }
 
 RiskOptimizer::~RiskOptimizer() {
@@ -489,7 +562,7 @@ std::vector<index_t> RiskOptimizer::search(risk_t lower,
         risk_t grad = alpha * min_PDR.size();
         for (index_t j = 0; j < min_PDR.size(); j++)
             if (u < cost(min_PDR[j], 0, 0)) grad--;
-        *(&(grad < 0 ? l : r)) = u;
+        (grad < 0 ? l : r) = u;
 
         std::cout << std::right
                   << std::setw(8)  << i

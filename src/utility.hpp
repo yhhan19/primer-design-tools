@@ -25,6 +25,7 @@
 #include <atomic>
 #include <set>
 #include <map>
+#include <future>
 
 extern "C" {
 #include "thal.h"
@@ -116,7 +117,7 @@ struct Args {
     double      dntp        = 0.6;
     double      dna_conc    = 200.0;
     
-    double      dg_thres    = -18000;
+    double      dg_thres    = -15000;
     double      temp        = 37.0;
 
     bool        help        = false;
@@ -189,31 +190,25 @@ Oligo extract_oligo(const primer_rec& p,
 PrimerOutput extract_all(const p3retval* retval,
                          const seq_args*  sa);
 
-std::vector<PrimerOutput> filterByDG(const std::vector<Result>& results,
-                                     double dg_threshold,
-                                     const std::vector<PrimerOutput>& original_primers);
-
-std::vector<PrimerOutput> filterByDG_debug(const std::vector<Result>& results,
-                                           double dg_threshold,
-                                           const std::vector<PrimerOutput>& original_primers);
-
-void test_primer3_orientation(p3_global_settings* pa);
-
 void print_solution(const std::vector<PrimerResult>& solution,
                     const std::vector<index_t>& pdrs);
 
 struct RemovalSets {
     std::set<int> remove_pair_F, remove_pair_R, remove_left, remove_right;
+    std::size_t num_return;
     bool all_removed(const PrimerOutput& original) const {
         size_t kept_left  = original.left_oligos.size()  - remove_left.size();
         size_t kept_right = original.right_oligos.size() - remove_right.size();
-        return kept_left < 5 || kept_right < 5;
+        return kept_left < num_return || kept_right < num_return;
     }
 };
 
 RemovalSets computeRemoval(const std::vector<const Result*>& output_results,
-                                   double threshold) ;
+                           double threshold, 
+                           std::size_t num_return) ;
 
-std::vector<PrimerOutput> filterByDG_relax(const std::vector<Result>& results,
-                                     double dg_threshold,
-                                     const std::vector<PrimerOutput>& original_primers) ;
+std::vector<PrimerOutput> filterByDG_relax(
+    const std::vector<Result>& results,
+    double dg_threshold,
+    const std::vector<PrimerOutput>& original_primers,
+    std::size_t num_return);

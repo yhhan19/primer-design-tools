@@ -205,8 +205,16 @@ weight_t KPartiteGraph::solve(std::size_t iter) {
     return dfs(0, solution, &count);
 }
 
-weight_t KPartiteGraph::solve_sa(std::size_t iter) {
+std::vector<index_t> KPartiteGraph::solve_sa(std::size_t iter) {
     return simulated_annealing(iter);
+}
+
+std::vector<index_t> KPartiteGraph::solve_tabu(std::size_t restart, std::size_t iter) {
+    return tabu_search(restart, iter);
+}
+
+std::vector<index_t> KPartiteGraph::solve_ga(std::size_t pop_size, std::size_t generations, double mutation_rate) {
+    return genetic_algorithm(pop_size, generations, mutation_rate);
 }
 
 weight_t KPartiteGraph::random_search(std::size_t iter) {
@@ -364,10 +372,10 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
             best_solution = solution;
         }
 
-        if (improved || r % 100 == 0) {
+        if (improved || r % 1000 == 0) {
             std::cout << std::right << std::fixed
                       << std::setw(10) << r
-                      << std::setw(15) << std::scientific << std::setprecision(3) << current
+                      << std::setw(15) << current
                       << std::setw(15) << global_best
                       << std::setw(8)  << moves
                       << (improved ? "  *" : "")
@@ -382,318 +390,330 @@ std::vector<index_t> KPartiteGraph::random_search_single_fast(std::size_t restar
     return best_solution;
 }
 
-std::vector<index_t>
-KPartiteGraph::beam_search_fast(std::size_t beam_width,
-                                std::size_t max_iters) {
-    if (beam_width == 0) {
-        return std::vector<index_t>(K, 0);
-    }
+std::vector<index_t> KPartiteGraph::simulated_annealing(std::size_t restarts) {
+    const std::size_t proposals_per_step = 200;
+    const double      alpha              = 0.985;
+    const double      Tmin              = 1e-6;
 
-    struct BeamNode {
-        std::vector<index_t> sol;                 // solution[p] in 0..N-1
-        std::vector<weight_t> S;                  // S[p]
-        std::vector<std::vector<weight_t>> contrib; // contrib[p][n]
-        weight_t score;                           // objective value
+    std::vector<index_t> solution(K, 0);
+    std::vector<index_t> best_solution(K, 0);
+    std::vector<index_t> global_solution(K, 0);
+
+    auto objective = [&]() -> weight_t {
+        weight_t obj = 0.0;
+        for (index_t p = 0; p < K; ++p)
+            for (index_t q = p + 1; q < K; ++q)
+                obj += graph[index(p, solution[p])][index(q, solution[q])];
+        return obj;
     };
 
-    auto gv_idx = [&](const std::vector<index_t>& sol, int p) -> index_t {
-        return index(p, sol[p]);
-    };
-    auto w = [&](index_t u, index_t v_) -> weight_t { return graph[u][v_]; };
-    auto v = [&](index_t u) -> weight_t { return vertices[u]; };
-
-    auto total_from_S = [&](const BeamNode& node) -> weight_t {
-        long double sum2 = 0, sum1 = 0;
-        for (int p = 0; p < (int)K; ++p) sum2 += (long double)node.S[p];
-        for (int p = 0; p < (int)K; ++p)
-            sum1 += (long double)v(gv_idx(node.sol, p));
-        return (weight_t)(sum2 * 0.5L) + sum1;
-    };
-
-    auto init_node = [&](BeamNode& node) {
-        node.S.assign(K, 0);
-        node.contrib.assign(K, std::vector<weight_t>(N, 0));
-
-        // S[p] = sum_{q != p} w(gv(p), gv(q))
-        for (int p = 0; p < (int)K; ++p) {
-            weight_t s = 0;
-            index_t vp = gv_idx(node.sol, p);
-            for (int q = 0; q < (int)K; ++q) if (q != p) {
-                s += w(vp, gv_idx(node.sol, q));
-            }
-            node.S[p] = s;
+    auto gain_of = [&](index_t p, index_t n) -> weight_t {
+        weight_t delta = 0.0;
+        for (index_t q = 0; q < K; ++q) {
+            if (q == p) continue;
+            delta += graph[index(p, n          )][index(q, solution[q])]
+                   - graph[index(p, solution[p])][index(q, solution[q])];
         }
-        // contrib[p][n] = sum_{q != p} w(index(p,n), gv(q))
-        for (int p = 0; p < (int)K; ++p) {
-            for (int n = 0; n < (int)N; ++n) {
-                index_t cand = index(p, n);
-                weight_t s = 0;
-                for (int q = 0; q < (int)K; ++q) if (q != p) {
-                    s += w(cand, gv_idx(node.sol, q));
-                }
-                node.contrib[p][n] = s;
-            }
-        }
-        node.score = total_from_S(node);
+        return delta;
     };
 
-    // --- Initialize beam with random solutions ---
-    std::vector<BeamNode> beam;
-    beam.reserve(beam_width);
-
-    for (std::size_t b = 0; b < beam_width; ++b) {
-        BeamNode node;
-        node.sol.resize(K);
-        for (int p = 0; p < (int)K; ++p) {
-            node.sol[p] = random_between(0, N - 1);
-        }
-        init_node(node);
-        beam.push_back(std::move(node));
-    }
-
-    // Keep beam sorted by score (descending)
-    auto by_score_desc = [](const BeamNode& a, const BeamNode& b) {
-        return a.score > b.score;
-    };
-    std::sort(beam.begin(), beam.end(), by_score_desc);
-
-    struct NeighborCandidate {
-        weight_t score;
-        std::size_t parent_idx;
-        int part;
-        int new_n;
-    };
-
-    for (std::size_t iter = 0; iter < max_iters; ++iter) {
-        std::vector<NeighborCandidate> candidates;
-        candidates.reserve(beam.size() * K * (N - 1));
-
-        // --- Expand all neighbors of all beam states ---
-        for (std::size_t bi = 0; bi < beam.size(); ++bi) {
-            const BeamNode& node = beam[bi];
-
-            for (int p = 0; p < (int)K; ++p) {
-                int old_n = node.sol[p];
-                index_t old_v = index(p, old_n);
-
-                for (int n = 0; n < (int)N; ++n) {
-                    if (n == old_n) continue;
-
-                    // Gain from changing part p to candidate n in this node
-                    weight_t gain = node.contrib[p][n] - node.S[p]
-                                  + v(index(p, n)) - v(old_v);
-                    weight_t new_score = node.score + gain;
-
-                    candidates.push_back(
-                        NeighborCandidate{new_score, bi, p, n});
-                }
-            }
-        }
-
-        if (candidates.empty()) break;
-
-        // Sort all neighbors globally by score (descending)
-        std::sort(candidates.begin(), candidates.end(),
-                  [](const NeighborCandidate& a,
-                     const NeighborCandidate& b) {
-                      return a.score > b.score;
-                  });
-
-        // --- Build next beam from top-k neighbors ---
-        std::vector<BeamNode> next_beam;
-        next_beam.reserve(beam_width);
-
-        for (std::size_t i = 0;
-             i < candidates.size() && next_beam.size() < beam_width;
-             ++i) {
-            const auto& cand = candidates[i];
-            const BeamNode& parent = beam[cand.parent_idx];
-
-            BeamNode child;
-            child.sol = parent.sol;
-            child.sol[cand.part] = cand.new_n;
-
-            // Compute S, contrib, and score for this child
-            init_node(child);
-            // Optionally, we could assert that child.score ≈ cand.score
-
-            next_beam.push_back(std::move(child));
-        }
-
-        if (next_beam.empty()) break;
-
-        std::sort(next_beam.begin(), next_beam.end(), by_score_desc);
-        beam.swap(next_beam);
-    }
-
-    // Return the best solution from the final beam
-    auto best_it = std::max_element(beam.begin(), beam.end(), by_score_desc);
-    if (best_it != beam.end()) {
-        return best_it->sol;
-    }
-    return std::vector<index_t>(K, 0);
-}
-
-
-void KPartiteGraph::dfs2(index_t k, index_t *solution, weight_t precost, weight_t *max, std::size_t *count) {
-    (*count) ++;
-    if (k == K) {
-        if (precost > *max) *max = precost;
-    }
-    else {
-        for (index_t i = 0; i < N; i ++) {
-            solution[k] = i;
-            weight_t delta = 0;
-            for (index_t j = 0; j < k; j ++) 
-                delta += graph[index(k, i)][index(j, solution[j])];
-            weight_t postcost = bound(k, solution);
-            if (postcost + precost + delta > *max)
-                dfs2(k + 1, solution, precost + delta, max, count);
-        }
-    }
-}
-
-weight_t KPartiteGraph::simulated_annealing(std::size_t restarts) {
-    // --- parameters (tweak as needed) ---
-    const std::size_t steps_per_restart   = -1;
-    const std::size_t proposals_per_step  = 200;
-    const double alpha                    = 0.985;    // geometric cooling
-    const double Tmin                     = 1e-6;
-
-    // state
-    std::vector<int> solution(K, 0);
-    std::vector<weight_t> S(K, 0.0);                         // S[p] = Σ_{q≠p} w(sol[p],sol[q])
-    std::vector<std::vector<weight_t>> contrib(              // contrib[p][n] = Σ_{q≠p} w(index(p,n),sol[q])
-        K, std::vector<weight_t>(N, 0.0));
-
-    auto w = [&](index_t u, index_t v) -> weight_t {
-        return graph[u][v];
-    };
-    auto gv = [&](int p) -> index_t { return index(p, solution[p]); };
-
-    auto init_random_solution = [&](){
-        for (int p = 0; p < K; ++p) solution[p] = random_between(0, N - 1);
-    };
-
-    auto init_caches = [&](){
-        // Build S and contrib for current solution
-        for (int p = 0; p < K; ++p) {
-            const index_t vp = gv(p);
-            weight_t sp = 0.0;
-            for (int q = 0; q < K; ++q) if (q != p) sp += w(vp, gv(q));
-            S[p] = sp;
-
-            for (int n = 0; n < N; ++n) {
-                const index_t v = index(p, n);
-                weight_t c = 0.0;
-                for (int q = 0; q < K; ++q) if (q != p) c += w(v, gv(q));
-                contrib[p][n] = c;
-            }
-        }
-    };
-
-    auto objective_from_S = [&]() -> weight_t {
-        long double sum2 = 0.0L;
-        for (int p = 0; p < K; ++p) sum2 += (long double)S[p];
-        return (weight_t)(sum2 * 0.5L); // each edge counted twice
-    };
-
-    // crude auto-T0: average abs gain of a few random proposals
-    auto estimate_T0 = [&]() -> double {
-        const size_t samples = std::min<size_t>(1000, static_cast<size_t>(K) * std::max<size_t>(1, N));
-        long double s = 0.0L;
-        for (int t = 0; t < samples; ++t) {
-            const int p = random_between(0, K - 1);
-            int n = solution[p];
-            if (N > 1) do { n = random_between(0, N - 1); } while (n == solution[p]);
-            const weight_t g = contrib[p][n] - S[p];
-            s += std::fabs((long double)g);
-        }
-        double avg = (samples ? (double)(s / samples) : 1.0);
-        return (avg > 1e-9 ? avg : 1.0);
-    };
+    const int TW = 8 + 16 + 6 + 16 + 14 + 10;
+    std::cout << "\nSimulated Annealing  (K=" << K << ", N=" << N
+              << ", restarts=" << restarts << ")\n"
+              << std::string(TW, '-') << "\n"
+              << std::right
+              << std::setw(8)  << "Restart"
+              << std::setw(16) << "T0"
+              << std::setw(6)  << "Steps"
+              << std::setw(16) << "Best(run)"
+              << std::setw(14) << "Global best"
+              << std::setw(10) << "Improved"
+              << "\n"
+              << std::string(TW, '-') << "\n";
 
     weight_t global_best = std::numeric_limits<weight_t>::lowest();
 
     for (std::size_t r = 0; r < restarts; ++r) {
-        // init
-        init_random_solution();
-        init_caches();
-        weight_t current = objective_from_S();
+        for (index_t p = 0; p < K; ++p) solution[p] = random_between(0, N - 1);
+        weight_t current   = objective();
         weight_t best_this = current;
+        best_solution      = solution;
 
-        double T = estimate_T0();
+        auto estimate_T0 = [&]() -> double {
+            const std::size_t samples = std::min<std::size_t>(1000, (std::size_t)K * N);
+            long double s = 0.0L;
+            for (std::size_t t = 0; t < samples; ++t) {
+                index_t p = random_between(0, K - 1);
+                index_t n = solution[p];
+                if (N > 1) do { n = random_between(0, N - 1); } while (n == solution[p]);
+                s += std::fabs((long double)gain_of(p, n));
+            }
+            double avg = samples ? (double)(s / samples) : 1.0;
+            return avg > 1e-9 ? avg : 1.0;
+        };
 
-        for (std::size_t step = 0; step < steps_per_restart; ++step) {
-            if (T < Tmin) break;
+        double T  = estimate_T0();
+        double T0 = T;
+        std::size_t steps_done = 0;
 
+        while (T > Tmin) {
+            ++steps_done;
             for (std::size_t it = 0; it < proposals_per_step; ++it) {
-                // propose: flip one part to a new candidate
-                const int p = random_between(0, K - 1);
-                int n = solution[p];
+                index_t p = random_between(0, K - 1);
+                index_t n = solution[p];
                 if (N > 1) do { n = random_between(0, N - 1); } while (n == solution[p]);
 
-                const weight_t gain = contrib[p][n] - S[p];
+                weight_t gain = gain_of(p, n);
                 bool accept = (gain >= 0.0);
-                if (!accept && T > 0.0) {
-                    // Metropolis for maximization: exp(gain / T)
-                    const double u = (double)random_between(0, 1000000) / 1000000.0;
-                    accept = (std::exp(std::min<weight_t>(gain / T, 40.0)) > u);
-                }
-                if (!accept) continue;
+                if (!accept)
+                    accept = (std::exp((double)gain / T) >
+                              (double)random_between(0, 1000000) / 1000000.0);
 
-                // apply move p := n
-                const index_t old_v = gv(p);
-                solution[p] = n;
-                const index_t new_v = gv(p);
-                current += gain;
-
-                // update S for all parts (O(K))
-                for (int q = 0; q < K; ++q) if (q != p) {
-                    const index_t vq = gv(q);
-                    S[q] += w(new_v, vq) - w(old_v, vq);
-                }
-                S[p] = contrib[p][n];
-
-                // update contrib for other parts (O(K·N))
-                for (int q = 0; q < K; ++q) if (q != p) {
-                    for (int m = 0; m < N; ++m) {
-                        const index_t u = index(q, m);
-                        contrib[q][m] += w(u, new_v) - w(u, old_v);
+                if (accept) {
+                    solution[p] = n;
+                    current    += gain;
+                    if (current > best_this) {
+                        best_this     = current;
+                        best_solution = solution;
                     }
                 }
-                // rebuild contrib for changed part p (O(K·N))
-                for (int m = 0; m < N; ++m) {
-                    const index_t v = index(p, m);
-                    weight_t c = 0.0;
-                    for (int q = 0; q < K; ++q) if (q != p) c += w(v, gv(q));
-                    contrib[p][m] = c;
-                }
-
-                if (current > best_this) best_this = current;
             }
-
-            // cool
             T *= alpha;
         }
 
-        if (best_this > global_best) global_best = best_this;
+        bool improved = (best_this > global_best);
+        if (improved) {
+            global_best = best_this;
+            global_solution = best_solution;
+        }
+
+        if (improved || (r + 1) % 100 == 0 || r == 0) {
+            std::cout << std::right << std::fixed << std::setprecision(4)
+                      << std::setw(8)  << (r + 1)
+                      << std::setw(16) << T0
+                      << std::setw(6)  << steps_done
+                      << std::setw(16) << best_this
+                      << std::setw(14) << global_best
+                      << std::setw(10) << (improved ? "✓" : "")
+                      << "\n";
+        }
     }
 
-    return global_best;
+    std::cout << std::string(TW, '-') << "\n"
+              << "Global best: " << global_best << "\n";
+
+    return global_solution;
 }
 
-weight_t KPartiteGraph::bound(index_t k, index_t *solution) {
-    weight_t total = 0;
-    for (index_t i = 0; i <= k; i ++) {
-        for (index_t j = k + 1; j < K; j ++) {
-            total += opt_graph_2[index(i, solution[i])][j];
+std::vector<index_t> KPartiteGraph::tabu_search(std::size_t restarts, std::size_t iterations) {
+    const index_t tabu_tenure = K * 2;
+
+    auto objective = [&](const std::vector<index_t>& sol) -> weight_t {
+        weight_t obj = 0.0;
+        for (index_t p = 0; p < K; ++p)
+            for (index_t q = p + 1; q < K; ++q)
+                obj += graph[index(p, sol[p])][index(q, sol[q])];
+        return obj;
+    };
+
+    auto gain_of = [&](const std::vector<index_t>& sol, index_t p, index_t n) -> weight_t {
+        weight_t delta = 0.0;
+        for (index_t q = 0; q < K; ++q) {
+            if (q == p) continue;
+            delta += graph[index(p, n      )][index(q, sol[q])]
+                   - graph[index(p, sol[p])][index(q, sol[q])];
+        }
+        return delta;
+    };
+
+    const int TW = 8 + 12 + 14 + 14 + 14 + 10;
+    std::cout << "\nTabu Search  (K=" << K << ", N=" << N
+              << ", restarts=" << restarts
+              << ", iterations=" << iterations << ")\n"
+              << std::string(TW, '-') << "\n"
+              << std::right
+              << std::setw(8)  << "Restart"
+              << std::setw(12) << "Init"
+              << std::setw(14) << "Iters"
+              << std::setw(14) << "Best(run)"
+              << std::setw(14) << "Global best"
+              << std::setw(10) << "Improved"
+              << "\n"
+              << std::string(TW, '-') << "\n";
+
+    std::vector<index_t> global_best_sol(K, 0);
+    weight_t             global_best = std::numeric_limits<weight_t>::lowest();
+
+    for (std::size_t r = 0; r < restarts; ++r) {
+        std::vector<index_t> solution(K);
+        for (index_t p = 0; p < K; ++p) solution[p] = random_between(0, N - 1);
+
+        weight_t             current      = objective(solution);
+        weight_t             best_this    = current;
+        std::vector<index_t> best_sol_this = solution;
+
+        // tabu_list[p][n] = iteration until (p,n) is no longer tabu
+        std::vector<std::vector<std::size_t>> tabu_list(K, std::vector<std::size_t>(N, 0));
+
+        for (std::size_t it = 0; it < iterations; ++it) {
+            weight_t best_gain = std::numeric_limits<weight_t>::lowest();
+            index_t  best_p   = 0;
+            index_t  best_n   = 0;
+            bool     found    = false;
+
+            for (index_t p = 0; p < K; ++p) {
+                for (index_t n = 0; n < N; ++n) {
+                    if (n == solution[p]) continue;
+
+                    bool     is_tabu    = (tabu_list[p][n] > it);
+                    weight_t gain       = gain_of(solution, p, n);
+                    bool     aspiration = is_tabu && (current + gain > global_best);
+
+                    if (!is_tabu || aspiration) {
+                        if (gain > best_gain) {
+                            best_gain = gain;
+                            best_p    = p;
+                            best_n    = n;
+                            found     = true;
+                        }
+                    }
+                }
+            }
+
+            if (!found) break;  // all moves tabu and no aspiration
+
+            tabu_list[best_p][solution[best_p]] = it + tabu_tenure;
+            solution[best_p] = best_n;
+            current += best_gain;
+
+            if (current > best_this) {
+                best_this     = current;
+                best_sol_this = solution;
+            }
+        }
+
+        bool improved = (best_this > global_best);
+        if (improved) {
+            global_best     = best_this;
+            global_best_sol = best_sol_this;
+        }
+
+        if (improved || (r + 1) % 100 == 0 || r == 0) {
+            std::cout << std::right << std::fixed << std::setprecision(4)
+                      << std::setw(8)  << (r + 1)
+                      << std::setw(12) << current
+                      << std::setw(14) << iterations
+                      << std::setw(14) << best_this
+                      << std::setw(14) << global_best
+                      << std::setw(10) << (improved ? "✓" : "")
+                      << "\n";
         }
     }
-    for (index_t i = k + 1; i < K; i ++) {
-        for (index_t j = i + 1; j < K; j ++) {
-            total += opt_graph[i][j];
+
+    std::cout << std::string(TW, '-') << "\n"
+              << "Global best: " << global_best << "\n";
+
+    return global_best_sol;
+}
+
+std::vector<index_t> KPartiteGraph::genetic_algorithm(
+    std::size_t pop_size, std::size_t generations, double mutation_rate)
+{
+    using Chromosome = std::vector<index_t>;
+
+    // must take sol as parameter, not capture
+    auto objective = [&](const Chromosome& sol) -> weight_t {
+        weight_t obj = 0.0;
+        for (index_t p = 0; p < K; ++p)
+            for (index_t q = p + 1; q < K; ++q)
+                obj += graph[index(p, sol[p])][index(q, sol[q])];
+        return obj;
+    };
+
+    auto gain_of = [&](const Chromosome& sol, index_t p, index_t n) -> weight_t {
+        weight_t delta = 0.0;
+        for (index_t q = 0; q < K; ++q) {
+            if (q == p) continue;
+            delta += graph[index(p, n      )][index(q, sol[q])]
+                   - graph[index(p, sol[p])][index(q, sol[q])];
+        }
+        return delta;
+    };
+
+    auto fitness = [&](const Chromosome& c) -> weight_t { return objective(c); };
+
+    auto crossover = [&](const Chromosome& a, const Chromosome& b) -> Chromosome {
+        Chromosome child(K);
+        for (index_t p = 0; p < K; ++p)
+            child[p] = (random_between(0, 1) ? a[p] : b[p]);
+        return child;
+    };
+
+    auto mutate = [&](Chromosome c) -> Chromosome {
+        for (index_t p = 0; p < K; ++p)
+            if ((double)random_between(0, 1000) / 1000.0 < mutation_rate)
+                c[p] = random_between(0, N - 1);
+        return c;
+    };
+
+    auto tournament = [&](const std::vector<Chromosome>& pop) -> Chromosome {
+        index_t a = random_between(0, (index_t)pop.size() - 1);
+        index_t b = random_between(0, (index_t)pop.size() - 1);
+        return fitness(pop[a]) > fitness(pop[b]) ? pop[a] : pop[b];
+    };
+
+    // init population
+    std::vector<Chromosome> pop(pop_size, Chromosome(K));
+    for (auto& c : pop)
+        for (index_t p = 0; p < K; ++p) c[p] = random_between(0, N - 1);
+
+    Chromosome best     = pop[0];
+    weight_t   best_obj = fitness(best);
+
+    const int TW = 10 + 14 + 14 + 10;
+    std::cout << "\nGenetic Algorithm  (K=" << K << ", N=" << N
+              << ", pop=" << pop_size << ", gen=" << generations << ")\n"
+              << std::string(TW, '-') << "\n"
+              << std::setw(10) << "Gen"
+              << std::setw(14) << "Best(gen)"
+              << std::setw(14) << "Global best"
+              << std::setw(10) << "Improved"
+              << "\n" << std::string(TW, '-') << "\n";
+
+    for (std::size_t g = 0; g < generations; ++g) {
+        std::vector<Chromosome> next_pop;
+        next_pop.reserve(pop_size);
+
+        // elitism: keep best
+        next_pop.push_back(best);
+
+        while (next_pop.size() < pop_size) {
+            auto child = crossover(tournament(pop), tournament(pop));
+            child      = mutate(child);
+            next_pop.push_back(child);
+        }
+        pop = std::move(next_pop);
+
+        // find best in generation
+        weight_t gen_best = std::numeric_limits<weight_t>::lowest();
+        for (auto& c : pop) {
+            weight_t f = fitness(c);
+            if (f > gen_best) gen_best = f;
+            if (f > best_obj) { best_obj = f; best = c; }
+        }
+
+        bool improved = (gen_best > best_obj);
+        if (improved || (g + 1) % 500 == 0 || g == 0) {
+            std::cout << std::fixed << std::setprecision(4)
+                      << std::setw(10) << (g + 1)
+                      << std::setw(14) << gen_best
+                      << std::setw(14) << best_obj
+                      << std::setw(10) << (improved ? "✓" : "")
+                      << "\n";
         }
     }
-    return total;
+
+    std::cout << std::string(TW, '-') << "\n"
+              << "Global best: " << best_obj << "\n";
+    return best;
 }
