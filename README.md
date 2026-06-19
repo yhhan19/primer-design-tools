@@ -4,21 +4,14 @@
 
 ## Quick Start
 
-The fastest way to run Δ-PRO is to clone the repository, build the `dpro` executable with a local Primer3 installation, and run the pipeline on a FASTA input file.
+The fastest way to run Δ-PRO depends on whether Primer3 is already installed on your system.
+
+### Option 1: Primer3 is already installed
 
 ```bash
 # Clone the repository
 git clone https://github.com/yhhan19/primer-design-tools.git
 cd primer-design-tools
-
-# If primer3 is not installed on your system
-## Initalize the primer3 submodule
-git submodule update --init --recursive
-
-## Run make on primer3
-cd primer3/src
-make
-cd ../..
 
 # Build Δ-PRO
 make PRIMER3=/path/to/primer3
@@ -29,10 +22,30 @@ make PRIMER3=/path/to/primer3
   -o ./data/results
 ```
 
-**Note:** Replace `/path/to/primer3` with the actual path to your [Primer3](https://github.com/primer3-org/primer3/) installation directory. For example, if Primer3 is located in the repository directory as `./primer3`, build Δ-PRO with:
+**Note:** Replace `/path/to/primer3` with the actual path to your Primer3 installation directory.
+
+### Option 2: Primer3 is not installed
 
 ```bash
+# Clone the repository
+git clone https://github.com/yhhan19/primer-design-tools.git
+cd primer-design-tools
+
+# Initialize the Primer3 submodule
+git submodule update --init --recursive
+
+# Build Primer3
+cd primer3/src
+make
+cd ../..
+
+# Build Δ-PRO using the local Primer3 installation
 make PRIMER3=./primer3
+
+# Run the pipeline using example data
+./bin/dpro \
+  -i ./data/sequence.fasta \
+  -o ./data/results
 ```
 
 The final primer solution will be written to:
