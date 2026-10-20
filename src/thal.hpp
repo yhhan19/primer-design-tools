@@ -19,29 +19,77 @@ struct ThermoResult {
     double tm;   // °C
 };
 
+// ── Thermocycler profile ──────────────────────────────────────────────────────
+//
+// ΔG evaluated at each stage of a standard PCR thermocycler cycle.
+// All dG values in cal/mol (same unit as ThermoResult).
+//
+// Interpretation for spurious duplex risk:
+//   dG_denature > 0  : duplex does not survive denaturation (good)
+//   dG_anneal   < 0  : duplex is stable at annealing temperature (flag)
+//   dG_extend   < 0  : duplex survives into extension, blocks polymerase (bad)
+//
+// worst_dG is min(dG_denature, dG_anneal, dG_extend) — the most stable
+// the duplex ever becomes during the cycle. Since dG(T) = dH - T*dS is
+// linear and dS < 0 (so dG increases with T), worst_dG always occurs at
+// T_denature for on-target duplexes but at T_anneal for weak spurious ones.
+// Checking worst_dG is therefore more conservative than dG(T_a) alone.
+
+struct ThermoProfile {
+    double dG_denature;  // cal/mol at T_denature (typically 95°C)
+    double dG_anneal;    // cal/mol at T_anneal
+    double dG_extend;    // cal/mol at T_extend   (typically 72°C)
+    double worst_dG;     // min of the three — most stable point in cycle
+    double T_denature;   // °C
+    double T_anneal;     // °C
+    double T_extend;     // °C
+};
+
 // ── Thal ─────────────────────────────────────────────────────────────────────
 
 class Thal {
 public:
     // ── Primer3/libthal interface ─────────────────────────────────────────────
     //
-    // init(): initialises libthal and stores salt concentrations for use in
-    //   the SantaLucia salt correction (na_mM_, mg_mM_, dntp_mM_).
-    //   mv:       monovalent cation [Na+] (mM)
-    //   dv:       divalent cation  [Mg2+] (mM)
-    //   dntp:     dNTP concentration (mM)
-    //   dna_conc: primer concentration (nM)
-    //   temp:     default annealing temperature (°C)
+    // init(): initialises libthal and stores salt concentrations and
+    //   thermocycler temperatures for use across all thermo computations.
+    //   mv:         monovalent cation [Na+] (mM)
+    //   dv:         divalent cation  [Mg2+] (mM)
+    //   dntp:       dNTP concentration (mM)
+    //   dna_conc:   primer concentration (nM)
+    //   T_anneal:   annealing temperature (°C)
+    //   T_denature: denaturation temperature (°C)
+    //   T_extend:   extension temperature (°C)
     //
     // Implementation (.cpp) must include:
     //   na_mM_ = mv;  mg_mM_ = dv;  dntp_mM_ = dntp;
+    //   T_anneal_ = T_anneal;  T_denature_ = T_denature;  T_extend_ = T_extend;
 
     static void init(const std::string& config_path,
                      double mv,
                      double dv,
                      double dntp,
                      double dna_conc,
-                     double temp);
+                     double T_anneal,
+                     double T_denature,
+                     double T_extend);
+
+    // Backward-compatible 6-argument overload for existing pipeline call sites.
+    // Uses standard PCR defaults: T_denature=94, T_extend=72.
+    static void init(const std::string& config_path,
+                     double mv,
+                     double dv,
+                     double dntp,
+                     double dna_conc,
+                     double T_anneal) {
+        init(config_path, mv, dv, dntp, dna_conc, T_anneal, 94.0, 72.0);
+    }
+
+    static void validate_dimer_range(double min_c, double max_c);
+    // Exact endpoint minimum for the fixed structure returned by libthal.
+    static double compute_dimer_worst_dg(const std::string& s1,
+                                        const std::string& s2,
+                                        double min_c, double max_c);
 
     static double compute_dimer_dg(const std::string& s1,
                                    const std::string& s2);
@@ -65,6 +113,55 @@ public:
                                        double conc_nM = 250.0);
 
     static double dG_at_T(const ThermoResult& r, double T_celsius);
+
+    // ── Thermocycler profile ──────────────────────────────────────────────────
+    //
+    // thermocycler_profile(): evaluates dG at denaturation, annealing, and
+    //   extension temperatures and returns a ThermoProfile.
+    //
+    // Two overloads:
+    //   (1) no temperatures — uses values stored at init() time, i.e. the
+    //       user-supplied CLI temperatures. Use this for the common case.
+    //   (2) explicit temperatures — overrides stored values for a specific
+    //       amplicon or reaction condition (e.g. touchdown PCR, hotstart).
+    //
+    // profile_is_safe(): returns true if worst_dG >= threshold (cal/mol).
+    //   Default threshold -2000 cal/mol (~-2 kcal/mol, Primer3 convention).
+
+    static ThermoProfile thermocycler_profile(const ThermoResult& r);
+
+    static ThermoProfile thermocycler_profile(const ThermoResult& r,
+                                              double T_denature,
+                                              double T_anneal,
+                                              double T_extend);
+
+    static bool profile_is_safe(const ThermoProfile& p,
+                                double threshold = -2000.0);
+
+    // ── Binding score ─────────────────────────────────────────────────────────
+    //
+    // binding_score(): three-point approximation of the integral of ΔG(T(t))
+    //   over the dangerous region of one thermocycler cycle.
+    //
+    //   S = min(ΔG(Td),0) + min(ΔG(Ta),0) + min(ΔG(Te),0)
+    //
+    // Assumes equal hold times and instantaneous ramps (see derivation).
+    // Only negative contributions are counted — positive ΔG means the duplex
+    // is unstable at that point and contributes nothing to spurious binding.
+    //
+    // S = 0   : duplex never stable in cycle — safe
+    // S < 0   : duplex stable at one or more holds — use as edge weight
+    // S << 0  : duplex stable throughout cycle — critical
+    //
+    // Two overloads: no-arg uses stored init() temperatures; explicit overload
+    // for per-amplicon temperature override.
+
+    static double binding_score(const ThermoResult& r);
+
+    static double binding_score(const ThermoResult& r,
+                                double T_denature,
+                                double T_anneal,
+                                double T_extend);
 
     static ThermoResult compute_thermo_heterodimer(const std::string& s1,
                                                    const std::string& s2,
@@ -93,6 +190,12 @@ private:
     static inline double na_mM_   = 50.0;
     static inline double mg_mM_   = 1.5;
     static inline double dntp_mM_ = 0.6;
+
+    // Thermocycler temperatures stored at init() (°C).
+    // All three are required — no implicit defaults.
+    static inline double T_denature_ = 0.0;
+    static inline double T_anneal_   = 0.0;
+    static inline double T_extend_   = 0.0;
 
     // ── SantaLucia 1998 helpers ───────────────────────────────────────────────
 
@@ -136,15 +239,18 @@ private:
         std::string name;
         std::string seqs;
         // SantaLucia path
-        double dH    = 0.0;
-        double dS    = 0.0;
-        double tm    = 0.0;
-        double dG_ta = 0.0;  // at Ta
-        double dG_te = 0.0;  // at Te
+        double dH          = 0.0;
+        double dS          = 0.0;
+        double tm          = 0.0;
+        double dG_denature = 0.0;  // at T_denature
+        double dG_anneal   = 0.0;  // at T_anneal
+        double dG_extend   = 0.0;  // at T_extend
+        double worst_dG    = 0.0;  // min over cycle
+        double score       = 0.0;  // binding_score: sum of negative dG terms
+        bool   safe        = false;
         // Primer3 libthal path
-        double dG_p3 = 0.0;
-        // delta
-        double delta = 0.0;  // dG_ta - dG_p3
+        double dG_p3       = 0.0;
+        double delta       = 0.0;  // dG_anneal - dG_p3
         std::string error;
     };
 
@@ -254,6 +360,48 @@ inline double Thal::dG_at_T(const ThermoResult& r, double T_celsius) {
     return r.dH - T_K * r.dS;  // cal/mol — dH and dS both in cal units
 }
 
+inline ThermoProfile Thal::thermocycler_profile(const ThermoResult& r) {
+    // Uses temperatures stored at init() — the common call path.
+    return thermocycler_profile(r, T_denature_, T_anneal_, T_extend_);
+}
+
+inline ThermoProfile Thal::thermocycler_profile(const ThermoResult& r,
+                                                 double T_denature,
+                                                 double T_anneal,
+                                                 double T_extend) {
+    ThermoProfile p;
+    p.T_denature   = T_denature;
+    p.T_anneal     = T_anneal;
+    p.T_extend     = T_extend;
+    p.dG_denature  = dG_at_T(r, T_denature);
+    p.dG_anneal    = dG_at_T(r, T_anneal);
+    p.dG_extend    = dG_at_T(r, T_extend);
+    p.worst_dG     = std::min({p.dG_denature, p.dG_anneal, p.dG_extend});
+    return p;
+}
+
+inline bool Thal::profile_is_safe(const ThermoProfile& p,
+                                   double threshold) {
+    // Safe if duplex is never stable enough to compete at any cycle stage.
+    // worst_dG >= threshold means the most favorable binding point is still
+    // above the risk threshold — duplex is too weak to matter.
+    return p.worst_dG >= threshold;
+}
+
+inline double Thal::binding_score(const ThermoResult& r) {
+    return binding_score(r, T_denature_, T_anneal_, T_extend_);
+}
+
+inline double Thal::binding_score(const ThermoResult& r,
+                                   double T_denature,
+                                   double T_anneal,
+                                   double T_extend) {
+    auto clamp = [](double x) { return x < 0.0 ? x : 0.0; };
+    return clamp(dG_at_T(r, T_denature))
+         + clamp(dG_at_T(r, T_anneal))
+         + clamp(dG_at_T(r, T_extend));
+}
+
 inline ThermoResult Thal::compute_thermo_heterodimer(const std::string& s1,
                                                      const std::string& s2,
                                                      double conc_nM) {
@@ -315,20 +463,12 @@ inline Thal::TestResult Thal::run_one(const TestCase& tc,
     if (!tc.s2.empty()) r.seqs += "/" + trunc(tc.s2, 10);
 
     try {
+        ThermoResult sl{};
+
         if (tc.s2.empty()) {
-            // ── Single-primer path ────────────────────────────────────────────
-            auto sl  = compute_thermo(tc.s1, tc.conc_nM);
-            r.dH     = sl.dH;
-            r.dS     = sl.dS;
-            r.tm     = sl.tm;
-            r.dG_ta  = dG_at_T(sl, Ta);
-            r.dG_te  = dG_at_T(sl, Te);
-            // Primer3: self-dimer dG as closest available scalar
-            r.dG_p3  = compute_dimer_dg(tc.s1, tc.s1);
+            sl      = compute_thermo(tc.s1, tc.conc_nM);
+            r.dG_p3 = compute_dimer_dg(tc.s1, tc.s1);
         } else {
-            // ── Heterodimer path ──────────────────────────────────────────────
-            // Align to equal length using 3' ends of both (most relevant
-            // for dimer risk: 3'-end dimers block extension)
             std::string a = tc.s1;
             std::string b = tc.s2;
             if (a.size() != b.size()) {
@@ -336,15 +476,27 @@ inline Thal::TestResult Thal::run_one(const TestCase& tc,
                 a = a.substr(a.size() - len);
                 b = b.substr(b.size() - len);
             }
-            auto sl  = compute_thermo_heterodimer(a, b, tc.conc_nM);
-            r.dH     = sl.dH;
-            r.dS     = sl.dS;
-            r.tm     = sl.tm;
-            r.dG_ta  = dG_at_T(sl, Ta);
-            r.dG_te  = dG_at_T(sl, Te);
-            r.dG_p3  = compute_dimer_dg(tc.s1, tc.s2);
+            sl      = compute_thermo_heterodimer(a, b, tc.conc_nM);
+            r.dG_p3 = compute_dimer_dg(tc.s1, tc.s2);
         }
-        r.delta = r.dG_ta - r.dG_p3;
+
+        // Populate base fields
+        r.dH = sl.dH;
+        r.dS = sl.dS;
+        r.tm = sl.tm;
+
+        // Full thermocycler profile — explicit temperatures since test
+        // Ta/Te are passed per-call and may differ from stored init() values
+        auto prof       = thermocycler_profile(sl, 95.0, Ta, Te);
+        r.dG_denature   = prof.dG_denature;
+        r.dG_anneal     = prof.dG_anneal;
+        r.dG_extend     = prof.dG_extend;
+        r.worst_dG      = prof.worst_dG;
+        r.safe          = profile_is_safe(prof);
+        r.score         = binding_score(sl, 95.0, Ta, Te);
+
+        r.delta = r.dG_anneal - r.dG_p3;
+
     } catch (const std::exception& e) {
         r.error = e.what();
     }
@@ -358,14 +510,16 @@ inline void Thal::print_results(const std::vector<TestResult>& results,
     constexpr int W_NAME = 22;
     constexpr int W_SEQ  = 26;
     constexpr int W_NUM  =  9;
-    const std::string SEP(W_NAME + W_SEQ + W_NUM * 7, '-');
+    constexpr int W_SAFE =  6;
+    // columns: dH dS Tm dG(95) dG(Ta) dG(Te) worst score dG(P3) DdG safe
+    const std::string SEP(W_NAME + W_SEQ + W_NUM * 9 + W_SAFE, '-');
 
     std::cout << "\nThal::run_tests()  --  SantaLucia 1998 vs Primer3 libthal\n"
               << "Ta = " << Ta << " C    Te = " << Te << " C    "
-              << "[primer] = 250 nM\n\n"
-              << "dG(Ta/Te): SantaLucia path at Ta/Te  |  "
-              << "dG(P3): libthal dG  |  DdG = dG(Ta) - dG(P3)\n"
+              << "T_denature = 95 C    [primer] = 250 nM\n\n"
               << "All dG in cal/mol.  "
+              << "score = sum of min(dG,0) at Td/Ta/Te  |  "
+              << "safe = worst_dG >= -2000  |  "
               << "*** = |DdG| > 2000 cal/mol\n\n";
 
     std::cout << SEP << "\n"
@@ -376,49 +530,60 @@ inline void Thal::print_results(const std::vector<TestResult>& results,
               << std::setw(W_NUM)  << "dH"
               << std::setw(W_NUM)  << "dS"
               << std::setw(W_NUM)  << "Tm"
+              << std::setw(W_NUM)  << "dG(95)"
               << std::setw(W_NUM)  << "dG(Ta)"
               << std::setw(W_NUM)  << "dG(Te)"
+              << std::setw(W_NUM)  << "worst"
+              << std::setw(W_NUM)  << "score"
               << std::setw(W_NUM)  << "dG(P3)"
               << std::setw(W_NUM)  << "DdG"
+              << std::setw(W_SAFE) << "safe"
               << "\n" << SEP << "\n";
 
     for (const auto& r : results) {
         std::cout << std::left
                   << std::setw(W_NAME) << r.name
                   << std::setw(W_SEQ)  << r.seqs
-                  << std::right << std::fixed << std::setprecision(2);
+                  << std::right << std::fixed << std::setprecision(0);
         if (!r.error.empty()) {
             std::cout << "  ERROR: " << r.error;
         } else {
             std::cout << std::setw(W_NUM) << r.dH
                       << std::setw(W_NUM) << r.dS
+                      << std::setprecision(1)
                       << std::setw(W_NUM) << r.tm
-                      << std::setw(W_NUM) << r.dG_ta
-                      << std::setw(W_NUM) << r.dG_te
+                      << std::setprecision(0)
+                      << std::setw(W_NUM) << r.dG_denature
+                      << std::setw(W_NUM) << r.dG_anneal
+                      << std::setw(W_NUM) << r.dG_extend
+                      << std::setw(W_NUM) << r.worst_dG
+                      << std::setw(W_NUM) << r.score
                       << std::setw(W_NUM) << r.dG_p3
-                      << std::setw(W_NUM) << r.delta;
+                      << std::setw(W_NUM) << r.delta
+                      << std::setw(W_SAFE) << (r.safe ? "Y" : "N");
             if (std::abs(r.delta) > 2000.0)
-                std::cout << "  ***";
+                std::cout << " ***";
         }
         std::cout << "\n";
     }
 
     std::cout << SEP << "\n\n"
               << "Notes:\n"
-              << "  Single-primer dG(P3): libthal self-dimer dG -- not\n"
-              << "    directly comparable to duplex dG(Ta); expect *** flags.\n"
-              << "    Constant DdG of ~197 cal/mol at Ta=60 is initiation\n"
-              << "    convention difference (flat vs per-terminal), not a bug.\n"
-              << "  Heterodimer dG(P3):   libthal uses DP alignment on full\n"
-              << "    sequences; SL path uses equal-length 3'-end alignment.\n"
-              << "    Equal-length cases (6,7,8): |DdG| < 100 cal/mol -- good.\n"
-              << "    Unequal-length case (9):    |DdG| ~1000-1200 cal/mol --\n"
-              << "    libthal finds longer effective overlap via DP; expected.\n"
-              << "  Salt correction:      Primer3 applies Owczarzy 2004;\n"
-              << "    SL path applies SantaLucia 2004 on dS only.\n"
-              << "    Systematic offset ~500-1000 cal/mol on heterodimers.\n"
-              << "  Pure GC / palindrome cases (2,4,8,12): DdG = 0 -- exact\n"
-              << "    agreement confirms NN summation and salt correction.\n";
+              << "  score:   binding_score = min(dG(95),0) + min(dG(Ta),0) +\n"
+              << "    min(dG(Te),0). Three-point approximation of integral of\n"
+              << "    dG(T(t)) over dangerous region. score=0 means safe;\n"
+              << "    more negative = more dangerous. Use as dimer edge weight.\n"
+              << "  dG(95):  should be positive (unstable at denaturation).\n"
+              << "  dG(Ta):  negative means spurious duplex forms at annealing.\n"
+              << "  dG(Te):  negative means duplex blocks polymerase.\n"
+              << "  worst:   most stable point in cycle (min of three).\n"
+              << "  safe:    worst_dG >= -2000 cal/mol (Primer3 default).\n"
+              << "  Single-primer dG(P3): libthal self-dimer -- not directly\n"
+              << "    comparable; constant DdG ~197 cal/mol is initiation\n"
+              << "    convention difference, not a bug.\n"
+              << "  Equal-length heterodimers (6,7,8): |DdG| < 100 -- good.\n"
+              << "  Unequal-length case (9): |DdG| ~1000 -- libthal finds\n"
+              << "    longer overlap via DP alignment; expected.\n";
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────

@@ -1,6 +1,9 @@
 #include "graph.hpp"
 
-KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
+KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
+                           double dimer_min_c, double dimer_max_c,
+                           const std::string& export_prefix) {
+    Thal::validate_dimer_range(dimer_min_c, dimer_max_c);
     K = input.size() * 2;
     N = 0;
     for (const auto& item : input) {
@@ -15,6 +18,24 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
         bool is_left = (k % 2 == 0);
         valid_N[k] = is_left ? input[amp].left_oligos.size()
                              : input[amp].right_oligos.size();
+    }
+
+    pair_choices.resize(input.size());
+    for (std::size_t group = 0; group < input.size(); ++group) {
+        const auto& output = input[group];
+        if (!output.pairs_required) continue;
+        for (const auto& pair : output.pairs) {
+            const auto left = std::find_if(output.left_oligos.begin(), output.left_oligos.end(),
+                [&](const Oligo& o) { return same_oligo(o, pair.left); });
+            const auto right = std::find_if(output.right_oligos.begin(), output.right_oligos.end(),
+                [&](const Oligo& o) { return same_oligo(o, pair.right); });
+            if (left == output.left_oligos.end() || right == output.right_oligos.end())
+                throw std::invalid_argument("Candidate pair refers to a missing primer");
+            pair_choices[group].emplace_back(left - output.left_oligos.begin(),
+                                             right - output.right_oligos.begin());
+        }
+        if (pair_choices[group].empty())
+            throw std::invalid_argument("No valid candidate pair for pool target " + std::to_string(group));
     }
 
     auto get_oligo = [&](index_t idx) -> const Oligo* {
@@ -35,6 +56,57 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
         for (index_t j = i + 1; j < K * N; j++)
             if (part(i) != part(j) && get_oligo(i) && get_oligo(j))
                 edges.emplace_back(i, j);
+
+    // Export only real candidate nodes and exactly the edges we will score.
+    // Complete and close the files before launching any dimer calculations.
+    if (!export_prefix.empty()) {
+        std::ofstream nodes(export_prefix + ".nodes.tsv");
+        std::ofstream links(export_prefix + ".edges.tsv");
+        std::ofstream meta(export_prefix + ".meta.tsv");
+        if (!nodes || !links || !meta)
+            throw std::runtime_error("Cannot open graph export: " + export_prefix);
+        nodes << "node_id\tpartition_id\tpool_amplicon_1based\tsegment_id\tside\tcandidate_1based\tsequence\tstart\tlength\tpdr_left\tpdr_right\n";
+        std::size_t real_nodes = 0;
+        for (index_t p = 0; p < K; ++p) {
+            const auto& amp = input[p/2];
+            for (index_t n = 0; n < valid_N[p]; ++n) {
+                const index_t id = index(p,n);
+                const auto& o = *get_oligo(id);
+                nodes << id << '\t' << p << '\t' << p/2+1 << '\t'
+                      << amp.segment_id << '\t' << (p%2 ? "R" : "L") << '\t'
+                      << n+1 << '\t' << o.seq << '\t' << o.start << '\t'
+                      << o.length << '\t' << amp.pdr_left << '\t' << amp.pdr_right << '\n';
+                ++real_nodes;
+            }
+        }
+        links << "source\ttarget\tweight_cal_per_mol\n";
+        for (const auto& edge : edges)
+            links << edge.first << '\t' << edge.second << "\tNA\n";
+        meta << "key\tvalue\nformat_version\t1\nstatus\tunweighted\n"
+             << "partitions\t" << K << "\nnode_id_stride\t" << N
+             << "\nnodes\t" << real_nodes << "\nedges\t" << edges.size()
+             << "\ndimer_temp_min_c\t" << dimer_min_c
+             << "\ndimer_temp_max_c\t" << dimer_max_c
+             << "\nnode_partition_segment_ids\tzero_based\n"
+             << "coordinates\tas_stored_in_Oligo_and_PrimerOutput\n"
+             << "edges\tundirected_once_no_self_edges_no_within_partition_edges\n";
+        std::ofstream allowed(export_prefix + ".allowed_pairs.tsv");
+        if (!allowed) throw std::runtime_error("Cannot write allowed pair graph export");
+        allowed << "pool_target_index\tleft_node_id\tright_node_id\n";
+        for (std::size_t group = 0; group < pair_choices.size(); ++group)
+            for (const auto& pair : pair_choices[group])
+                allowed << group << '\t' << index(2*group, pair.first) << '\t'
+                        << index(2*group+1, pair.second) << '\n';
+        meta << "allowed_pairs_file\t" << export_prefix << ".allowed_pairs.tsv\n";
+        allowed.close();
+        if (!allowed) throw std::runtime_error("Failed writing allowed pair graph export");
+        nodes.close(); links.close(); meta.close();
+        if (!nodes || !links || !meta)
+            throw std::runtime_error("Failed writing graph export: " + export_prefix);
+        std::cout << "Exported unweighted K-partite graph before dimer scoring: "
+                  << export_prefix << ".{nodes,edges,meta}.tsv ("
+                  << real_nodes << " nodes, " << edges.size() << " edges)\n" << std::flush;
+    }
 
     std::size_t total_edges = edges.size();
     const int TW = 14 + 4 + 10 + 6;
@@ -74,7 +146,9 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
         threads[t] = std::thread([&, t]() {
             for (std::size_t e = t; e < edges.size(); e += nthreads) {
                 auto [i, j] = edges[e];
-                results[e] = Thal::compute_dimer_dg(get_oligo(i)->seq, get_oligo(j)->seq);
+                results[e] = Thal::compute_dimer_worst_dg(
+                    get_oligo(i)->seq, get_oligo(j)->seq,
+                    dimer_min_c, dimer_max_c);
                 std::size_t c = count.fetch_add(1) + 1;
                 if (c % step == 0) {
                     int pct = (int)(100.0 * c / total_edges);
@@ -91,6 +165,41 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input) {
         });
     }
     for (auto& th : threads) th.join();
+
+    // Replace the initial unweighted edge list only after every score exists.
+    if (!export_prefix.empty()) {
+        std::ofstream links(export_prefix + ".edges.tsv");
+        if (!links)
+            throw std::runtime_error("Cannot open weighted graph export: " + export_prefix);
+        links << "source\ttarget\tweight_cal_per_mol\n"
+              << std::setprecision(std::numeric_limits<double>::max_digits10);
+        for (std::size_t e = 0; e < edges.size(); ++e)
+            links << edges[e].first << '\t' << edges[e].second << '\t' << results[e] << '\n';
+        links.close();
+        if (!links)
+            throw std::runtime_error("Failed writing weighted graph export: " + export_prefix);
+
+        // Preserve the existing metadata, changing only the completion status.
+        std::ifstream input_meta(export_prefix + ".meta.tsv");
+        if (!input_meta)
+            throw std::runtime_error("Cannot read graph metadata: " + export_prefix);
+        std::ostringstream updated;
+        std::string line;
+        while (std::getline(input_meta, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            updated << (line == "status\tunweighted" ? "status\tweighted" : line) << '\n';
+        }
+        if (input_meta.bad())
+            throw std::runtime_error("Failed reading graph metadata: " + export_prefix);
+        input_meta.close();
+        std::ofstream meta(export_prefix + ".meta.tsv");
+        meta << updated.str();
+        meta.close();
+        if (!meta)
+            throw std::runtime_error("Failed updating graph metadata: " + export_prefix);
+        std::cout << "Exported calculated dimer weights: " << export_prefix
+                  << ".edges.tsv (cal/mol)\n";
+    }
 
     // write results to graph (single threaded, no races)
     for (std::size_t e = 0; e < edges.size(); e++) {
@@ -947,11 +1056,104 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_tabu(std::size_t restarts,
     return best_solution;
 }
 
+void KPartiteGraph::validate_pair_choices(const std::vector<index_t>& solution) const {
+    for (std::size_t group = 0; group < pair_choices.size(); ++group) {
+        const auto& choices = pair_choices[group];
+        if (!choices.empty() && std::find(choices.begin(), choices.end(),
+            std::make_pair(solution[2*group], solution[2*group+1])) == choices.end())
+            throw std::invalid_argument("Solution contains an unvalidated primer pair");
+    }
+}
+
+weight_t KPartiteGraph::rank_bottleneck_score(
+    const std::vector<index_t>& solution, std::size_t allowed_bad) const {
+    const std::size_t edge_count = K < 2 ? 0 : std::size_t(K) * (K - 1) / 2;
+    if (edge_count == 0 || allowed_bad >= edge_count)
+        throw std::invalid_argument("rank bottleneck requires K >= 2 and allowed_bad < K*(K-1)/2");
+    if (solution.size() != K)
+        throw std::invalid_argument("rank bottleneck solution size must equal K");
+    for (index_t p = 0; p < K; ++p) {
+        const index_t count = valid_N.empty() ? N : valid_N[p];
+        if (solution[p] >= count)
+            throw std::invalid_argument("rank bottleneck solution contains an invalid candidate");
+    }
+    validate_pair_choices(solution);
+    std::vector<weight_t> edges;
+    edges.reserve(edge_count);
+    for (index_t p = 0; p < K; ++p)
+        for (index_t q = p + 1; q < K; ++q) {
+            const weight_t w = graph[index(p, solution[p])][index(q, solution[q])];
+            if (!std::isfinite(w))
+                throw std::invalid_argument("rank bottleneck requires finite edge weights");
+            edges.push_back(w);
+        }
+    // Zero-based rank k is the (k+1)-th smallest value; no full sort needed.
+    std::nth_element(edges.begin(), edges.begin() + allowed_bad, edges.end());
+    return edges[allowed_bad];
+}
+
+weight_t KPartiteGraph::dimer_sum_score(const std::vector<index_t>& solution) const {
+    if (K < 2 || solution.size() != K)
+        throw std::invalid_argument("dimer sum requires K >= 2 and a solution of size K");
+    for (index_t p = 0; p < K; ++p)
+        if (solution[p] >= (valid_N.empty() ? N : valid_N[p]))
+            throw std::invalid_argument("dimer sum contains an invalid candidate");
+    validate_pair_choices(solution);
+    weight_t total = 0;
+    for (index_t p = 0; p < K; ++p)
+        for (index_t q = p + 1; q < K; ++q)
+        {
+            const weight_t w = graph[index(p, solution[p])][index(q, solution[q])];
+            if (!std::isfinite(w)) throw std::invalid_argument("Non-finite dimer edge");
+            total += w;
+        }
+    if (!std::isfinite(total)) throw std::invalid_argument("Non-finite dimer sum");
+    return total;
+}
+
+std::vector<index_t> KPartiteGraph::solve_sum_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, weight_t& out_score) {
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling, 0, out_score, true);
+}
+
+std::vector<index_t> KPartiteGraph::solve_rank_bottleneck_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, std::size_t allowed_bad, weight_t& out_threshold) {
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling,
+                              allowed_bad, out_threshold, false);
+}
+
+std::vector<index_t> KPartiteGraph::solve_objective_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, std::size_t allowed_bad, weight_t& out_threshold, bool sum) {
+    const std::size_t edge_count = K < 2 ? 0 : std::size_t(K) * (K - 1) / 2;
+    if (edge_count == 0 || allowed_bad >= edge_count)
+        throw std::invalid_argument("rank bottleneck requires K >= 2 and allowed_bad < K*(K-1)/2");
+    if (restarts == 0 || !std::isfinite(init_temp) || init_temp <= 0 ||
+        !std::isfinite(cooling) || cooling <= 0 || cooling > 1)
+        throw std::invalid_argument("invalid rank bottleneck SA parameters");
+    // Non-primer constructors represent rectangular graphs with N candidates.
+    if (valid_N.empty()) valid_N.assign(K, N);
+    for (index_t p = 0; p < K; ++p)
+        if (valid_N[p] == 0)
+            throw std::invalid_argument("rank bottleneck partition has no valid candidates");
+    return bottleneck_search_sa(restarts, max_iter, init_temp, cooling,
+                                out_threshold, allowed_bad, sum);
+}
+
 std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
                                                           std::size_t max_iter,
                                                           double      init_temp,
                                                           double      cooling,
-                                                          weight_t&   out_threshold) {
+                                                          weight_t&   out_threshold,
+                                                          std::size_t allowed_bad, bool sum) {
+    auto score = [&](const std::vector<index_t>& solution) {
+        if (sum) return dimer_sum_score(solution);
+        if (allowed_bad > 0) return rank_bottleneck_score(solution, allowed_bad);
+        index_t ignored = 0;
+        return full_bottleneck(solution, ignored);
+    };
     for (index_t p = 0; p < K; ++p) {
         if (valid_N[p] == 0) {
             std::cerr << "bottleneck_search_sa: partition " << p << " has no valid nodes\n";
@@ -965,6 +1167,8 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
 
     const int TW = 10 + 15 + 15 + 10 + 12;
     std::cout << "\nSA Search  (K=" << K << ", N=" << N
+              << ", objective=" << (sum ? "sum" : "rank")
+              << ", allowed_bad=" << allowed_bad
               << ", restarts=" << restarts
               << ", max_iter=" << max_iter
               << ", init_temp=" << init_temp
@@ -984,8 +1188,13 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
         for (index_t p = 0; p < K; ++p)
             solution[p] = random_between(0, valid_N[p] - 1);
 
-        index_t  bn_p    = 0;
-        weight_t current = full_bottleneck(solution, bn_p);
+        for (std::size_t group = 0; group < pair_choices.size(); ++group)
+            if (!pair_choices[group].empty()) {
+                const auto choice = pair_choices[group][random_between(0, pair_choices[group].size()-1)];
+                solution[2*group] = choice.first;
+                solution[2*group+1] = choice.second;
+            }
+        weight_t current = score(solution);
 
         std::vector<index_t> local_best     = solution;
         weight_t             local_best_cost = current;
@@ -997,9 +1206,24 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
             // Pick random partition and random candidate node
             index_t p = random_between(0, K - 1);
             index_t n = random_between(0, valid_N[p] - 1);
-            if (n == solution[p]) continue;
+            index_t other = p;
+            index_t other_n = solution[p];
+            if (p / 2 < pair_choices.size() && !pair_choices[p / 2].empty()) {
+                const auto& choices = pair_choices[p / 2];
+                const auto choice = choices[random_between(0, choices.size()-1)];
+                p = (p / 2) * 2;
+                other = p + 1;
+                n = choice.first;
+                other_n = choice.second;
+            }
+            if (n == solution[p] && (other == p || other_n == solution[other])) continue;
 
-            weight_t candidate = evaluate_swap(solution, p, n);
+            const index_t old_n = solution[p], old_other = solution[other];
+            solution[p] = n;
+            if (other != p) solution[other] = other_n;
+            weight_t candidate = score(solution);
+            solution[p] = old_n;
+            if (other != p) solution[other] = old_other;
             double   delta     = candidate - current;
 
             // Accept if better, or with probability exp(delta/temp) if worse
@@ -1008,7 +1232,8 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
 
             if (accept) {
                 solution[p] = n;
-                current     = full_bottleneck(solution, bn_p);
+                if (other != p) solution[other] = other_n;
+                current     = candidate;
 
                 if (current > local_best_cost) {
                     local_best_cost = current;

@@ -5,59 +5,92 @@
 #include "pipeline.hpp"
 
 static void print_usage(const char* prog) {
+    const Args defaults;
     std::cerr
         << "Usage:\n"
         << "  " << prog << " -i <input> -o <output> [options]\n"
         << "\n"
-        /*
-        << "Modes (required):\n"
-        << "  pdr               Run PDR optimization\n"
-        << "  dimer             Run dimer optimization\n"
-        << "  off               Run off-target search\n"
-        << "\n"
-        */
-        << "I/O (required):\n"
-        << "  -i <file>         Input file\n"
-        << "  -o <file>         Output file\n"
-        << "  -r <file>         Reference file (for off target search)\n"
+        << "I/O and configuration:\n"
+        << "  -i <file>         Input FASTA file or directory of .fa/.fasta files (required)\n"
+        << "  -o <file>         Output file prefix (required)\n"
+        << "  -r <file>         Optional background reference; omit to skip off-target search\n"
+        << "  -a <file>         Optional per-position risk file; run PDR stage only\n"
+        << "  --args <file>     Load saved key = value configuration\n"
+        << "                    Options/configurations apply in command-line order; later values override earlier ones.\n"
+        << "                    Effective settings are saved to <output>.args.\n"
         << "\n"
         << "PDR / risk optimization parameters:\n"
-        << "  -Ln <int>         Amplicon max length (default 420)\n"
-        << "  -Lx <int>         Amplicon min length (default 252)\n"
-        << "  -Lp <int>         PDR length (default 40)\n"
-        << "  -Ux <double>      Max PDR score (default 10000)\n"
-        << "  -Un <double>      Min PDR score (default 0.1)\n"
+        << "  -Ln <int>         Amplicon max length (default " << defaults.len_amp << ")\n"
+        << "  -Lx <int>         Amplicon min length (default " << defaults.len_amp_min << ")\n"
+        << "  -Lp <int>         PDR length (default " << defaults.len_PDR << ")\n"
+        << "  --pdr-search <fixed|midpoint>  PDR layout algorithm (default " << defaults.pdr_search << ")\n"
+        << "  --pdr-min-candidates <int>  Exact Primer3 candidates required per PDR side (default " << defaults.pdr_min_candidates << ": adaptive)\n"
+        << "  -Ux <double>      Max PDR score (default " << defaults.u_max << ")\n"
+        << "  -Un <double>      Min PDR score (default " << defaults.u_min << ")\n"
         << "\n"
         << "Primer3 parameters:\n"
-        << "  --p3-opt-size <int>     Primer optimal size (default 20)\n"
-        << "  --p3-min-size <int>     Primer min size (default 18)\n"
-        << "  --p3-max-size <int>     Primer max size (default 25)\n"
-        << "  --p3-opt-tm <double>    Primer optimal Tm (default 60.0)\n"
-        << "  --p3-min-tm <double>    Primer min Tm (default 57.0)\n"
-        << "  --p3-max-tm <double>    Primer max Tm (default 63.0)\n"
-        << "  --p3-min-gc <double>    Primer min GC% (default 40.0)\n"
-        << "  --p3-max-gc <double>    Primer max GC% (default 60.0)\n"
-        << "  --p3-num-return <int>   Number of candidates (default 10)\n"
+        << "  --p3-opt-size <int>     Primer optimal size (default " << defaults.p3_opt_size << ")\n"
+        << "  --p3-min-size <int>     Primer min size (default " << defaults.p3_min_size << ")\n"
+        << "  --p3-max-size <int>     Primer max size (default " << defaults.p3_max_size << ")\n"
+        << "  --p3-opt-tm <double>    Primer optimal Tm (default " << defaults.p3_opt_tm << ")\n"
+        << "  --p3-min-tm <double>    Primer min Tm (default " << defaults.p3_min_tm << ")\n"
+        << "  --p3-max-tm <double>    Primer max Tm (default " << defaults.p3_max_tm << ")\n"
+        << "  --p3-min-gc <double>    Primer min GC% (default " << defaults.p3_min_gc << ")\n"
+        << "  --p3-max-gc <double>    Primer max GC% (default " << defaults.p3_max_gc << ")\n"
+        << "  --p3-num-return <int>   Minimum candidates preserved after filtering (default " << defaults.num_return << ")\n"
+        << "  --p3-weighted-keep-percent <0-100>  Inactive while variation filtering is disabled; saved value (default " << defaults.p3_weighted_keep_percent << ")\n"
+        << "\nMSA pair filtering (after Primer3 pair checks):\n"
+        << "  --pair-keep-percent <0-100>  Ranked pairs to retain, including ties (default " << defaults.pair_keep_percent << ")\n"
+        << "  --pair-min-return <int>     Minimum pairs retained when available (default " << defaults.pair_min_return << ")\n"
+        << "  --pair-max-mismatches <int>  Maximum mismatches per primer for joint coverage (default " << defaults.pair_max_mismatches << ")\n"
+        << "  --pair-max-3prime-mismatches <int>  Maximum 3-prime mismatches per primer (default " << defaults.pair_max_3prime_mismatches << ")\n"
+        << "  --pair-3prime-window <int>  Terminal window length in bases (default " << defaults.pair_3prime_window << ")\n"
+        << "  Rank: joint coverage, joint exact 3-prime match, then weighted mismatch.\n"
+        << "  Fractions use all MSA sequences; gaps/ambiguous sites are unknown, not matches.\n"
         << "\n"
         << "Off-target search parameters:\n"
-        << "  -k <int>          K-mer length (default 8)\n"
-        << "  -H <int>          Hamming threshold (default 2)\n"
-        << "  -G <double>       Delta G threshold (default 1e8)\n"
-        << "  -t <int>          Number of threads (default 8)\n"
-        << "  -C <int>          Chunk size (default 100000000)\n"
-        << "  -B <int>          Block size (default 134217728)\n"
+        << "  --off-target-mode <single|paired>  Filtering unit (default " << defaults.off_target_mode << ")\n"
+        << "  --off-target-amp-min <int>  Minimum predicted off-target product, bp (default " << defaults.off_target_amp_min << ")\n"
+        << "  --off-target-amp-max <int>  Maximum predicted off-target product, bp (default " << defaults.off_target_amp_max << ")\n"
+        << "  Paired mode checks retained candidate pairs: same contig, inward-facing sites, both dG < -G.\n"
+        << "  Chunk overlap is max product length minus one; the left site owns each product.\n"
+        << "  Reference products are not automatically excluded as intended targets.\n"
+        << "  -k <int>          K-mer length (default " << defaults.kmer_len << ")\n"
+        << "  -H <int>          Hamming threshold (default " << defaults.threshold/2 << ")\n"
+        << "  -H2 <int>         Alternative adjacent-mismatch count (opt-in; same limit units as -H)\n"
+        << "  -G <double>       Off-target dG cutoff, cal/mol (default " << defaults.dg_thres << ")\n"
+        << "  -t <int>          Number of threads (default " << defaults.nthreads << ")\n"
+        << "  -C <int>          Chunk size (default " << defaults.chunk_size << ")\n"
+        << "  -B <int>          Block size (default " << defaults.block_size << ")\n"
         << "\n"
         << "Dimer parameters:\n"
-        << "  -I <int>          Iterations for solver (default 1000)\n"
-        << "  -S <int>          Random seed (default 42)\n"
+        << "  --dimer-methods <list>  Comma-separated sum,min-max,top-k-bound (default " << defaults.dimer_methods << ")\n"
+        << "  --dimer-select <method>  Method supplying final panel (default top-k-bound if listed, otherwise first)\n"
+        << "  --dimer-bad-percent <double>  Allowed worst interactions in percent [0,100), default " << defaults.dimer_bad_percent << "\n"
+        << "  --dimer-temp-min <double>  Annealing window minimum in C (default " << defaults.dimer_temp_min.value() << ")\n"
+        << "  --dimer-temp-max <double>  Annealing window maximum in C (default " << defaults.dimer_temp_max.value() << ")\n"
+        << "                           Use equal min/max values for a single dimer temperature.\n"
+        << "  -I <int>          Iterations for solver (default " << defaults.iter << ")\n"
+        << "  -S <int>          Random seed (default " << defaults.seed << ")\n"
         << "\n"
         << "Thermodynamic parameters:\n"
-        << "  --mv <double>     Monovalent conc (default 50.0)\n"
-        << "  --dv <double>     Divalent conc (default 1.5)\n"
-        << "  --dntp <double>   dNTP conc (default 0.6)\n"
-        << "  --dna <double>    DNA conc (default 200.0)\n"
-        << "  --temp <double>   Temperature in C (default 37.0)\n"
-        << "Other:\n"
+        << "  --mv <double>     Monovalent conc, mM (default " << defaults.mv << ")\n"
+        << "  --dv <double>     Divalent conc, mM (default " << defaults.dv << ")\n"
+        << "  --dntp <double>   dNTP conc, mM (default " << defaults.dntp << ")\n"
+        << "  --dna <double>    DNA conc, nM (default " << defaults.dna_conc << ")\n"
+        << "  --temp <double>   Non-dimer scoring temperature, C (default " << defaults.temp << ")\n"
+        << "                    Dimer min/max override --temp only for dimer scoring.\n"
+        << "                    Retained oligos are paired before off-target screening.\n"
+        << "                    Pairing uses Primer3 default pair checks without a geometry/product-length prefilter.\n"
+        << "                    All dimer methods select only validated pair combinations.\n"
+        << "\nFixed internal settings (reported in the run log; no CLI switches):\n"
+        << "  PDR forward/reverse limits: " << defaults.len_fu << "/" << defaults.len_ru << " bp\n"
+        << "  Dimer SA: 4000 restarts, 5 * -I proposals/restart, initial temperature 1000,\n"
+        << "            exponential cooling toward 1e-6; each method resets to -S.\n"
+        << "  All dimer objectives exclude self-dimers. Higher dG is better.\n"
+        << "  top-k-bound uses k=floor(edges * percent/100), then maximizes rank k+1.\n"
+        << "  Saved threshold_mode is standard (-H) or adjacent (-H2); threshold stores the user limit.\n"
+        << "\nOther:\n"
         << "  -h, --help        Show this help message\n"
         << "\n";
 }
@@ -89,10 +122,11 @@ static std::size_t require_integer(int& i,
                                    const char* opt) {
     const char* v = require_value(i, argc, argv, opt);
     try {
+        if (v[0] == '-') throw std::runtime_error("must be nonnegative");
         std::size_t pos = 0;
         std::size_t tmp = std::stoull(v, &pos);
         if (pos != std::strlen(v)) {
-            throw std::runtime_error("Seed contains non-numeric characters");
+            throw std::runtime_error("contains non-numeric characters");
         }
         return tmp;
     } catch (const std::exception& e) {
@@ -141,16 +175,37 @@ static Args parse_args_file(const std::string& path, Args a) {
 
         if      (key == "input_file")   a.input_file   = val;
         else if (key == "output_file")  a.output_file  = val;
+        else if (key == "rate_file") a.rate_file = val;
         else if (key == "ref_file")     a.ref_file     = val;
         else if (key == "seed")         a.seed         = std::stoull(val);
         else if (key == "len_amp")      a.len_amp      = std::stoull(val);
         else if (key == "len_amp_min")  a.len_amp_min  = std::stoull(val);
         else if (key == "len_PDR")      a.len_PDR      = std::stoull(val);
+        else if (key == "pdr_search")   a.pdr_search   = val;
+        else if (key == "pdr_min_candidates") a.pdr_min_candidates = std::stoull(val);
         else if (key == "u_max")        a.u_max        = std::stod(val);
         else if (key == "u_min")        a.u_min        = std::stod(val);
         else if (key == "iter")         a.iter         = std::stoull(val);
+        else if (key == "off_target_mode") a.off_target_mode = val;
+        else if (key == "off_target_amp_min") {
+            std::size_t consumed=0;
+            if(val.empty() || val[0]=='-') throw std::runtime_error("Invalid --off-target-amp-min in args file");
+            a.off_target_amp_min=std::stoull(val,&consumed);
+            if(consumed!=val.size()) throw std::runtime_error("Invalid --off-target-amp-min in args file");
+        }
+        else if (key == "off_target_amp_max") {
+            std::size_t consumed=0;
+            if(val.empty() || val[0]=='-') throw std::runtime_error("Invalid --off-target-amp-max in args file");
+            a.off_target_amp_max=std::stoull(val,&consumed);
+            if(consumed!=val.size()) throw std::runtime_error("Invalid --off-target-amp-max in args file");
+        }
         else if (key == "kmer_len")     a.kmer_len     = std::stoull(val);
-        else if (key == "threshold")    a.threshold    = std::stoull(val) * 2;
+        else if (key == "threshold")    a.threshold    = std::stoull(val) * 2 + a.threshold % 2;
+        else if (key == "threshold_mode") {
+            if (val != "standard" && val != "adjacent")
+                throw std::runtime_error("threshold_mode must be standard or adjacent");
+            a.threshold = (a.threshold / 2) * 2 + (val == "adjacent" ? 1 : 0);
+        }
         else if (key == "nthreads")     a.nthreads     = std::stoull(val);
         else if (key == "block_size")   a.block_size   = std::stoull(val);
         else if (key == "chunk_size")   a.chunk_size   = std::stoull(val);
@@ -160,6 +215,56 @@ static Args parse_args_file(const std::string& path, Args a) {
         else if (key == "dntp")         a.dntp         = std::stod(val);
         else if (key == "dna_conc")     a.dna_conc     = std::stod(val);
         else if (key == "temp")         a.temp         = std::stod(val);
+        else if (key == "pair_keep_percent") {
+            std::size_t consumed = 0;
+            if (val.empty() || val[0] == '-')
+                throw std::runtime_error("Invalid --pair-keep-percent in args file");
+            a.pair_keep_percent = std::stod(val, &consumed);
+            if (consumed != val.size())
+                throw std::runtime_error("Invalid --pair-keep-percent in args file");
+        }
+        else if (key == "pair_min_return") {
+            std::size_t consumed = 0;
+            if (val.empty() || val[0] == '-')
+                throw std::runtime_error("Invalid --pair-min-return in args file");
+            a.pair_min_return = std::stoull(val, &consumed);
+            if (consumed != val.size())
+                throw std::runtime_error("Invalid --pair-min-return in args file");
+        }
+        else if (key == "pair_max_mismatches") {
+            std::size_t consumed = 0;
+            if (val.empty() || val[0] == '-')
+                throw std::runtime_error("Invalid --pair-max-mismatches in args file");
+            a.pair_max_mismatches = std::stoull(val, &consumed);
+            if (consumed != val.size())
+                throw std::runtime_error("Invalid --pair-max-mismatches in args file");
+        }
+        else if (key == "pair_max_3prime_mismatches") {
+            std::size_t consumed = 0;
+            if (val.empty() || val[0] == '-')
+                throw std::runtime_error("Invalid --pair-max-3prime-mismatches in args file");
+            a.pair_max_3prime_mismatches = std::stoull(val, &consumed);
+            if (consumed != val.size())
+                throw std::runtime_error("Invalid --pair-max-3prime-mismatches in args file");
+        }
+        else if (key == "pair_3prime_window") {
+            std::size_t consumed = 0;
+            if (val.empty() || val[0] == '-')
+                throw std::runtime_error("Invalid --pair-3prime-window in args file");
+            a.pair_3prime_window = std::stoull(val, &consumed);
+            if (consumed != val.size())
+                throw std::runtime_error("Invalid --pair-3prime-window in args file");
+        }
+        else if (key == "dimer_methods") a.dimer_methods = val;
+        else if (key == "dimer_select") a.dimer_select = val;
+        else if (key == "dimer_bad_percent") {
+            std::size_t parsed = 0;
+            a.dimer_bad_percent = std::stod(val, &parsed);
+            if (parsed != val.size())
+                throw std::runtime_error("Invalid --dimer-bad-percent in args file");
+        }
+        else if (key == "dimer_temp_min") a.dimer_temp_min = std::stod(val);
+        else if (key == "dimer_temp_max") a.dimer_temp_max = std::stod(val);
         else if (key == "p3_opt_size")  a.p3_opt_size  = std::stoull(val);
         else if (key == "p3_min_size")  a.p3_min_size  = std::stoull(val);
         else if (key == "p3_max_size")  a.p3_max_size  = std::stoull(val);
@@ -169,6 +274,7 @@ static Args parse_args_file(const std::string& path, Args a) {
         else if (key == "p3_min_gc")    a.p3_min_gc    = std::stod(val);
         else if (key == "p3_max_gc")    a.p3_max_gc    = std::stod(val);
         else if (key == "num_return")   a.num_return   = std::stoull(val);
+        else if (key == "p3_weighted_keep_percent") a.p3_weighted_keep_percent = std::stoull(val);
         else throw std::runtime_error("Unknown key in args file: " + key);
     }
     return a;
@@ -181,6 +287,7 @@ static void save_args(const Args& a, const std::string& path) {
     auto now = std::chrono::system_clock::now();
     auto t   = std::chrono::system_clock::to_time_t(now);
     f << "# Saved args -- " << std::ctime(&t);
+    f << std::setprecision(std::numeric_limits<double>::max_digits10);
 
     f << "\n# I/O\n";
     f << "input_file  = " << a.input_file  << "\n";
@@ -188,20 +295,41 @@ static void save_args(const Args& a, const std::string& path) {
     if (!a.ref_file.empty())
     f << "ref_file    = " << a.ref_file    << "\n";
 
+    if (!a.rate_file.empty()) f << "rate_file = " << a.rate_file << "\n";
+
     f << "\n# PDR\n";
     f << "len_amp     = " << a.len_amp     << "\n";
     f << "len_amp_min = " << a.len_amp_min << "\n";
     f << "len_PDR     = " << a.len_PDR     << "\n";
+    f << "pdr_search  = " << a.pdr_search  << "\n";
+    f << "pdr_min_candidates = " << a.pdr_min_candidates << "\n";
     f << "u_max       = " << a.u_max       << "\n";
     f << "u_min       = " << a.u_min       << "\n";
     f << "seed        = " << a.seed        << "\n";
 
+    f << "\n# MSA pair filtering\n";
+    f << "pair_keep_percent = " << a.pair_keep_percent << "\n";
+    f << "pair_min_return = " << a.pair_min_return << "\n";
+    f << "pair_max_mismatches = " << a.pair_max_mismatches << "\n";
+    f << "pair_max_3prime_mismatches = " << a.pair_max_3prime_mismatches << "\n";
+    f << "pair_3prime_window = " << a.pair_3prime_window << "\n";
+
     f << "\n# Dimer\n";
     f << "iter        = " << a.iter        << "\n";
+    f << "dimer_methods = " << a.dimer_methods << "\n";
+    if (!a.dimer_select.empty()) f << "dimer_select = " << a.dimer_select << "\n";
+    f << "dimer_bad_percent = " << std::setprecision(std::numeric_limits<double>::max_digits10)
+      << a.dimer_bad_percent << "\n";
+    if (a.dimer_temp_min) f << "dimer_temp_min = " << *a.dimer_temp_min << "\n";
+    if (a.dimer_temp_max) f << "dimer_temp_max = " << *a.dimer_temp_max << "\n";
 
     f << "\n# Off-target search\n";
+    f << "off_target_mode = " << a.off_target_mode << "\n";
+    f << "off_target_amp_min = " << a.off_target_amp_min << "\n";
+    f << "off_target_amp_max = " << a.off_target_amp_max << "\n";
     f << "kmer_len    = " << a.kmer_len    << "\n";
     f << "threshold   = " << a.threshold/2 << "\n";
+    f << "threshold_mode = " << (a.threshold % 2 ? "adjacent" : "standard") << "\n";
     f << "nthreads    = " << a.nthreads    << "\n";
     f << "chunk_size  = " << a.chunk_size  << "\n";
     f << "block_size  = " << a.block_size  << "\n";
@@ -224,14 +352,16 @@ static void save_args(const Args& a, const std::string& path) {
     f << "p3_min_gc   = " << a.p3_min_gc   << "\n";
     f << "p3_max_gc   = " << a.p3_max_gc   << "\n";
     f << "num_return  = " << a.num_return  << "\n";
+    f << "p3_weighted_keep_percent = " << a.p3_weighted_keep_percent << "\n";
 }
 
 static Args parse_args(int argc, char** argv) {
     Args a;
+    std::vector<std::string> loaded_args_files;
  
     // Print command line start
     std::cout << "\nCommand executed:" << std::endl;
-    std::cout << argv[0] << " " << argv[1];
+    std::cout << argv[0];
  
     for (int i = 1; i < argc; ++i) {
         const char* cur = argv[i];
@@ -246,6 +376,7 @@ static Args parse_args(int argc, char** argv) {
         } else if (is_flag(cur, "--args")) {
             const char* path = require_value(i, argc, argv, "--args");
             a = parse_args_file(path, a);
+            loaded_args_files.push_back(path);
             std::cout << " " << path << "  # Args file";
         } else if (is_flag(cur, "-i")) {
             a.input_file = require_value(i, argc, argv, "-i");
@@ -256,6 +387,18 @@ static Args parse_args(int argc, char** argv) {
         } else if (is_flag(cur, "-r")) {
             a.ref_file = require_value(i, argc, argv, "-r");
             std::cout << " " << a.ref_file << "  # Reference file";
+        } else if (is_flag(cur, "-a")) {
+            a.rate_file = require_value(i, argc, argv, "-a");
+            std::cout << " " << a.rate_file << "  # Rate file";
+        } else if (is_flag(cur, "--off-target-mode")) {
+            a.off_target_mode = require_value(i, argc, argv, "--off-target-mode");
+            std::cout << " " << a.off_target_mode;
+        } else if (is_flag(cur, "--off-target-amp-min")) {
+            a.off_target_amp_min = require_integer(i, argc, argv, "--off-target-amp-min");
+            std::cout << " " << a.off_target_amp_min;
+        } else if (is_flag(cur, "--off-target-amp-max")) {
+            a.off_target_amp_max = require_integer(i, argc, argv, "--off-target-amp-max");
+            std::cout << " " << a.off_target_amp_max;
         } else if (is_flag(cur, "-k")) {
             a.kmer_len = require_integer(i, argc, argv, "-k");
             std::cout << " " << a.kmer_len << "  # Kmer length";
@@ -279,16 +422,46 @@ static Args parse_args(int argc, char** argv) {
             std::cout << " " << a.dg_thres << "  # dG threshold";
         } else if (is_flag(cur, "--mv")) {
             a.mv = require_numeric(i, argc, argv, "--mv");
-            std::cout << " " << a.mv << "  # Monovalent concentration";
+            std::cout << " " << a.mv << "  # Monovalent conc, mMentration";
         } else if (is_flag(cur, "--dv")) {
             a.dv = require_numeric(i, argc, argv, "--dv");
-            std::cout << " " << a.dv << "  # Divalent concentration";
+            std::cout << " " << a.dv << "  # Divalent conc, mMentration";
         } else if (is_flag(cur, "--dntp")) {
             a.dntp = require_numeric(i, argc, argv, "--dntp");
-            std::cout << " " << a.dntp << "  # dNTP concentration";
+            std::cout << " " << a.dntp << "  # dNTP conc, mMentration";
         } else if (is_flag(cur, "--dna")) {
             a.dna_conc = require_numeric(i, argc, argv, "--dna");
             std::cout << " " << a.dna_conc << "  # DNA concentration";
+        } else if (is_flag(cur, "--pair-keep-percent")) {
+            a.pair_keep_percent = require_numeric(i, argc, argv, "--pair-keep-percent");
+            std::cout << " " << a.pair_keep_percent;
+        } else if (is_flag(cur, "--pair-min-return")) {
+            a.pair_min_return = require_integer(i, argc, argv, "--pair-min-return");
+            std::cout << " " << a.pair_min_return;
+        } else if (is_flag(cur, "--pair-max-mismatches")) {
+            a.pair_max_mismatches = require_integer(i, argc, argv, "--pair-max-mismatches");
+            std::cout << " " << a.pair_max_mismatches;
+        } else if (is_flag(cur, "--pair-max-3prime-mismatches")) {
+            a.pair_max_3prime_mismatches = require_integer(i, argc, argv, "--pair-max-3prime-mismatches");
+            std::cout << " " << a.pair_max_3prime_mismatches;
+        } else if (is_flag(cur, "--pair-3prime-window")) {
+            a.pair_3prime_window = require_integer(i, argc, argv, "--pair-3prime-window");
+            std::cout << " " << a.pair_3prime_window;
+        } else if (is_flag(cur, "--dimer-methods")) {
+            a.dimer_methods = require_value(i, argc, argv, "--dimer-methods");
+            std::cout << " " << a.dimer_methods;
+        } else if (is_flag(cur, "--dimer-select")) {
+            a.dimer_select = require_value(i, argc, argv, "--dimer-select");
+            std::cout << " " << a.dimer_select;
+        } else if (is_flag(cur, "--dimer-bad-percent")) {
+            a.dimer_bad_percent = require_numeric(i, argc, argv, "--dimer-bad-percent");
+            std::cout << " " << a.dimer_bad_percent;
+        } else if (is_flag(cur, "--dimer-temp-min")) {
+            a.dimer_temp_min = require_numeric(i, argc, argv, "--dimer-temp-min");
+            std::cout << " " << *a.dimer_temp_min;
+        } else if (is_flag(cur, "--dimer-temp-max")) {
+            a.dimer_temp_max = require_numeric(i, argc, argv, "--dimer-temp-max");
+            std::cout << " " << *a.dimer_temp_max;
         } else if (is_flag(cur, "--temp")) {
             a.temp = require_numeric(i, argc, argv, "--temp");
             std::cout << " " << a.temp << "  # Temperature";
@@ -304,6 +477,14 @@ static Args parse_args(int argc, char** argv) {
         } else if (is_flag(cur, "-Lp")) {
             a.len_PDR = require_integer(i, argc, argv, "-Lp");
             std::cout << " " << a.len_PDR << "  # PDR length";
+        } else if (is_flag(cur, "--pdr-search")) {
+            a.pdr_search = require_value(i, argc, argv, "--pdr-search");
+            std::cout << " " << a.pdr_search << "  # PDR search algorithm";
+        } else if (is_flag(cur, "--pdr-min-candidates")) {
+            a.pdr_min_candidates = require_integer(
+                i, argc, argv, "--pdr-min-candidates");
+            std::cout << " " << a.pdr_min_candidates
+                      << "  # PDR candidate minimum (0=adaptive)";
         } else if (is_flag(cur, "-Ux")) {
             a.u_max = require_numeric(i, argc, argv, "-Ux");
             std::cout << " " << a.u_max << "  # Max PDR score";
@@ -339,7 +520,12 @@ static Args parse_args(int argc, char** argv) {
             std::cout << " " << a.p3_max_gc << "  # Primer max GC%";
         } else if (is_flag(cur, "--p3-num-return")) {
             a.num_return = require_integer(i, argc, argv, "--p3-num-return");
-            std::cout << " " << a.num_return << "  # Primers to return";
+            std::cout << " " << a.num_return << "  # Minimum after filtering";
+        } else if (is_flag(cur, "--p3-weighted-keep-percent")) {
+            a.p3_weighted_keep_percent = require_integer(
+                i, argc, argv, "--p3-weighted-keep-percent");
+            std::cout << " " << a.p3_weighted_keep_percent
+                      << "  # Inactive variation-filter percentage (saved for compatibility)";
         } else {
             throw std::runtime_error(std::string("Unknown option: ") + cur);
         }
@@ -348,30 +534,100 @@ static Args parse_args(int argc, char** argv) {
     // End command line display
     std::cout << std::endl << std::endl;
 
+    if (a.off_target_mode != "single" && a.off_target_mode != "paired")
+        throw std::runtime_error("--off-target-mode must be single or paired");
+    if (a.off_target_amp_min == 0 || a.off_target_amp_min > a.off_target_amp_max)
+        throw std::runtime_error("--off-target-amp-min/max require 1 <= min <= max");
+    if (a.chunk_size == 0 || a.block_size == 0 || a.nthreads == 0 || a.kmer_len == 0)
+        throw std::runtime_error("-C, -B, -t and -k must be positive");
+    if (a.off_target_amp_max - 1 > std::numeric_limits<std::size_t>::max() - a.chunk_size)
+        throw std::runtime_error("--off-target-amp-max is too large for chunk overlap");
+    if (!std::isfinite(a.dg_thres)) throw std::runtime_error("-G must be finite");
+    if (!std::isfinite(a.pair_keep_percent) || a.pair_keep_percent < 0 || a.pair_keep_percent > 100)
+        throw std::runtime_error("--pair-keep-percent must be finite and in [0,100]");
+    if (a.pair_min_return == 0 || a.pair_3prime_window == 0)
+        throw std::runtime_error("--pair-min-return and --pair-3prime-window must be positive");
+    if (a.pair_max_3prime_mismatches > a.pair_3prime_window)
+        throw std::runtime_error("--pair-max-3prime-mismatches cannot exceed --pair-3prime-window");
+    std::set<std::string> seen_methods;
+    std::istringstream method_stream(a.dimer_methods);
+    std::string method;
+    if (a.dimer_methods.empty() || a.dimer_methods.back() == ',')
+        throw std::runtime_error("--dimer-methods must be a nonempty comma-separated list");
+    while (std::getline(method_stream, method, ',')) {
+        if (method != "sum" && method != "min-max" && method != "top-k-bound")
+            throw std::runtime_error("Unknown --dimer-methods entry: " + method);
+        if (!seen_methods.insert(method).second)
+            throw std::runtime_error("Duplicate --dimer-methods entry: " + method);
+    }
+    if (a.dimer_select.empty())
+        a.dimer_select = seen_methods.count("top-k-bound") ? "top-k-bound"
+            : a.dimer_methods.substr(0, a.dimer_methods.find(','));
+    if (!seen_methods.count(a.dimer_select))
+        throw std::runtime_error("--dimer-select must be included in --dimer-methods");
+    if (a.iter == 0 || a.iter > std::numeric_limits<std::size_t>::max() / 5)
+        throw std::runtime_error("-I must be positive and allow multiplication by 5");
+    if (!std::isfinite(a.dimer_bad_percent) || a.dimer_bad_percent < 0 || a.dimer_bad_percent >= 100) {
+        throw std::runtime_error("--dimer-bad-percent must be finite and in [0,100)");
+    }
+    if (a.dimer_temp_min.has_value() != a.dimer_temp_max.has_value()) {
+        throw std::runtime_error("Specify both --dimer-temp-min and --dimer-temp-max");
+    }
+    Thal::validate_dimer_range(a.dimer_temp_min.value_or(a.temp),
+                              a.dimer_temp_max.value_or(a.temp));
     if (a.input_file.empty() || a.output_file.empty()) {
         throw std::runtime_error("Missing required -i / -o");
     }
-    /*
-    if (a.mode == "off" && a.ref_file.empty()) {
-        throw std::runtime_error("Missing required -r");
+    if (a.p3_weighted_keep_percent > 100) {
+        throw std::runtime_error(
+            "--p3-weighted-keep-percent must be between 0 and 100");
     }
-    */
+    if (a.num_return == 0) {
+        throw std::runtime_error("--p3-num-return must be at least 1");
+    }
+    if (a.pdr_search != "fixed" && a.pdr_search != "midpoint") {
+        throw std::runtime_error(
+            "--pdr-search must be either fixed or midpoint");
+    }
+    if (a.len_amp_min > a.len_amp) {
+        throw std::runtime_error(
+            "amplicon minimum length cannot exceed its maximum length");
+    }
+    if (a.len_amp_min < a.len_PDR || a.len_amp < a.len_PDR) {
+        throw std::runtime_error(
+            "amplicon lengths must be at least the PDR length");
+    }
     std::cout << "\nProgram Parameters\n";
     std::cout << "  Input file      : " << a.input_file  << "\n";
     std::cout << "  Output file     : " << a.output_file << "\n";
 
-    if (!a.ref_file.empty())
-        std::cout << "  Reference file  : " << a.ref_file    << "\n";
+    std::cout << "  Reference file  : " << (a.ref_file.empty() ? "(not set; off-target search skipped)" : a.ref_file) << "\n";
+    std::cout << "  Rate file (-a)  : " << (a.rate_file.empty() ? "(not set)" : a.rate_file) << "\n";
+    std::cout << "  Pipeline mode   : " << (a.rate_file.empty() ? "full pipeline" : "PDR only") << "\n";
+    std::cout << "  Args files      : ";
+    if (loaded_args_files.empty()) std::cout << "(none)";
+    for (std::size_t i = 0; i < loaded_args_files.size(); ++i)
+        std::cout << (i ? ", " : "") << loaded_args_files[i];
+    std::cout << "\n";
 
     std::cout << "\nPDR Parameters\n";
     std::cout << "  Amp length max  : " << a.len_amp     << "\n";
     std::cout << "  Amp length min  : " << a.len_amp_min << "\n";
     std::cout << "  PDR length      : " << a.len_PDR     << "\n";
+    std::cout << "  PDR search      : " << a.pdr_search  << "\n";
+    std::cout << "  PDR candidate min: ";
+    if (a.pdr_min_candidates == 0) std::cout << "adaptive\n";
+    else std::cout << a.pdr_min_candidates << "\n";
+    std::cout << "  Forward limit   : " << a.len_fu << " bp (fixed internal setting)\n";
+    std::cout << "  Reverse limit   : " << a.len_ru << " bp (fixed internal setting)\n";
     std::cout << "  Max PDR score   : " << a.u_max       << "\n";
     std::cout << "  Min PDR score   : " << a.u_min       << "\n";
     std::cout << "  Random seed     : " << a.seed        << "\n";
 
     std::cout << "\nPrimer3 Parameters\n";
+    std::cout << "  Pairing         : retained left x right; Primer3 pair validation\n";
+    std::cout << "  Pair geometry   : prefilter disabled; -Lx/-Ln control PDR layout only\n";
+    std::cout << "  Pair selection  : Primer3-valid, MSA-retained combinations; whole-pair SA moves\n";
     std::cout << "  Opt size        : " << a.p3_opt_size << "\n";
     std::cout << "  Min size        : " << a.p3_min_size << "\n";
     std::cout << "  Max size        : " << a.p3_max_size << "\n";
@@ -380,25 +636,56 @@ static Args parse_args(int argc, char** argv) {
     std::cout << "  Max Tm          : " << a.p3_max_tm   << "\n";
     std::cout << "  Min GC%         : " << a.p3_min_gc   << "\n";
     std::cout << "  Max GC%         : " << a.p3_max_gc   << "\n";
-    std::cout << "  Num return      : " << a.num_return  << "\n";
+    std::cout << "  Candidate min   : " << a.num_return  << "\n";
+    std::cout << "  Single filtering: disabled; all Primer3 candidates reach pair checks\n";
+    std::cout << "  Mismatch fallback: "
+              << a.p3_weighted_keep_percent << "% (inactive; saved for compatibility)\n";
 
+    std::cout << "\nMSA Pair Filter Parameters\n";
+    std::cout << "  Pair keep %     : " << a.pair_keep_percent << " (boundary ties retained)\n";
+    std::cout << "  Pair minimum    : " << a.pair_min_return << " (when available)\n";
+    std::cout << "  Max mismatches  : " << a.pair_max_mismatches << " per primer\n";
+    std::cout << "  Max 3-prime mm  : " << a.pair_max_3prime_mismatches << " per primer\n";
+    std::cout << "  3-prime window  : " << a.pair_3prime_window << " bases\n";
+    std::cout << "  Pair MSA ranking: joint coverage desc, joint 3-prime match desc, weighted mismatch asc\n";
+    std::cout << "  Unknown sites   : gaps/ambiguities; denominator includes all MSA sequences\n";
     std::cout << "\nOff-target Search Parameters\n";
+    std::cout << "  Filter mode     : " << a.off_target_mode << "\n";
+    std::cout << "  Off-target bp   : " << a.off_target_amp_min << " to " << a.off_target_amp_max << "\n";
+    std::cout << "  Paired overlap  : " << a.off_target_amp_max - 1 << " bases\n";
+    std::cout << "  Pair criteria   : both dG < cutoff, same contig, inward-facing non-overlapping sites\n";
+    std::cout << "  Reference scope : all products; intended loci are not automatically excluded\n";
     std::cout << "  Kmer length     : " << a.kmer_len    << "\n";
     std::cout << "  Hamming thres   : " << a.threshold/2 << "\n";
+    std::cout << "  Mismatch mode   : " << (a.threshold % 2 ? "adjacent (-H2)" : "standard (-H)") << "\n";
+    std::cout << "  Encoded threshold: " << a.threshold << "\n";
     std::cout << "  Threads         : " << a.nthreads    << "\n";
     std::cout << "  Chunk size      : " << a.chunk_size  << "\n";
     std::cout << "  Block size      : " << a.block_size  << "\n";
 
     std::cout << "\nDimer Parameters\n";
-    std::cout << "  Iterations      : " << a.iter        << "\n";
+    std::cout << "  Dimer methods   : " << a.dimer_methods << "\n";
+    std::cout << "  Dimer select    : " << (a.dimer_select.empty() ? a.dimer_methods.substr(0, a.dimer_methods.find(',')) : a.dimer_select) << "\n";
+    std::cout << "  Dimer bad %     : " << a.dimer_bad_percent << "\n";
+    std::cout << "  dG window (C)   : " << a.dimer_temp_min.value_or(a.temp)
+              << " to " << a.dimer_temp_max.value_or(a.temp)
+              << " (minimum dG, cal/mol)\n";
+    std::cout << "  Iterations (-I) : " << a.iter << "\n";
+    std::cout << "  SA restarts     : 4000 per method/pool (fixed)\n";
+    std::cout << "  SA proposals    : " << a.iter * 5 << " per restart (5 * -I)\n";
+    std::cout << "  SA initial temp : 1000 (score units; fixed)\n";
+    std::cout << "  SA final target : 1e-6 (fixed)\n";
+    std::cout << "  SA cooling      : " << std::exp(std::log(1e-6 / 1000.0) / double(a.iter * 5)) << " per proposal\n";
+    std::cout << "  Dimer rank      : floor(edges * bad_percent / 100) + 1, per pool\n";
+    std::cout << "  Self-dimers     : excluded from objectives\n";
     std::cout << "  Random seed     : " << a.seed        << "\n";
 
     std::cout << "\nThermo parameters\n";
-    std::cout << "  dG thres        : " << a.dg_thres    << "\n";
-    std::cout << "  Monovalent (mv) : " << a.mv          << "\n";
-    std::cout << "  Divalent (dv)   : " << a.dv          << "\n";
-    std::cout << "  dNTP            : " << a.dntp        << "\n";
-    std::cout << "  DNA conc        : " << a.dna_conc    << "\n";
+    std::cout << "  dG thres (cal/mol): " << a.dg_thres    << "\n";
+    std::cout << "  Monovalent (mM) : " << a.mv          << "\n";
+    std::cout << "  Divalent (mM)   : " << a.dv          << "\n";
+    std::cout << "  dNTP (mM)       : " << a.dntp        << "\n";
+    std::cout << "  DNA conc (nM)   : " << a.dna_conc    << "\n";
     std::cout << "  Temp (C)        : " << a.temp        << "\n";
 
     std::cout << std::endl;
@@ -411,9 +698,6 @@ static Args parse_args(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     try {
-        Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 50.0, 1.5, 0.6, 250.0, 60.0);
-        Thal::run_tests();          // default Ta=60, Te=72
-        Thal::run_tests(58.0, 72.0); // custom temperatures
         PipelineContext ctx;
 
         ctx.args = parse_args(argc, argv);
@@ -460,6 +744,13 @@ int main(int argc, char** argv) {
         }
 
         Pipeline p;
+
+        if (! ctx.args.rate_file.empty()) {
+            p.add(std::make_unique<PDRStage>());
+            p.run(ctx);
+            return 0;
+        }
+
         p.add(std::make_unique<PDRStage>());
         p.add(std::make_unique<PrimerSelStage>());
         p.add(std::make_unique<OffTargetStage>());
@@ -469,6 +760,7 @@ int main(int argc, char** argv) {
         print_solution(ctx.solution_primers);
 
         save_solution(ctx.segments, ctx.solution_primers, ctx.args.output_file + ".bed");
+        save_coverage_report(ctx.segments, ctx.solution_primers, ctx.args.output_file);
 
         return 0;
     } catch (const std::exception& e) {

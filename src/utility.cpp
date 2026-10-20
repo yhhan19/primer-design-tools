@@ -1,4 +1,5 @@
 #include "utility.hpp"
+#include "thal.hpp"
 
 std::size_t read_fasta(const std::string &file_name, 
                        std::vector<std::string> &labels, 
@@ -390,7 +391,7 @@ void convert(const std::vector<PrimerOutput>& primer_outputs,
         const auto& output = primer_outputs[i];
         
         // Extract primer pairs
-        for (size_t j = 0; j < output.pairs.size(); ++j) {
+        for (size_t j = 0; !output.pairs_required && j < output.pairs.size(); ++j) {
             // Forward primer
             labels.push_back("OUT" + std::to_string(i) + "_P" + std::to_string(j) + "_F");
             sequences.push_back(output.pairs[j].left.seq);
@@ -451,6 +452,216 @@ PrimerOutput extract_all(const p3retval* retval,
             extract_oligo(retval->rev.oligo[i], sa->sequence, true));
 
     return out;
+}
+
+static bool is_acgt(char c) {
+    return c == 'A' ||
+           c == 'C' ||
+           c == 'G' ||
+           c == 'T';
+}
+
+
+static double mismatch_weight_from_3prime(int distance) {
+    // distance = 0 means terminal 3' nucleotide
+    if (distance == 0) return 20.0;
+    if (distance == 1) return 12.0;
+    if (distance == 2) return 8.0;
+    if (distance <= 4) return 4.0;
+    if (distance <= 7) return 2.0;
+    return 1.0;
+}
+
+void score_primer_variants(
+    Oligo& oligo,
+    const std::vector<std::string>& sequences,
+    bool is_right
+) {
+    constexpr int THREE_PRIME_WINDOW = 5;
+
+    double mismatches = 0.0;
+    double valid_positions = 0.0;
+
+    double weighted_mismatches = 0.0;
+    double weighted_positions = 0.0;
+    double possible_positions = 0.0;
+    double binding_ddg_sum = 0.0;
+    std::size_t binding_ddg_count = 0;
+    std::unordered_map<std::string, double> binding_dg_cache;
+    const double perfect_binding_dg =
+        Thal::compute_dimer_dg(oligo.seq, oligo.seq);
+
+    std::size_t evaluated_genomes = 0;
+    std::size_t genomes_with_any_mismatch = 0;
+    std::size_t genomes_with_3prime_mismatch = 0;
+
+    for (const std::string& genome : sequences) {
+
+        if (oligo.start < 0 ||
+            oligo.length <= 0 ||
+            static_cast<std::size_t>(
+                oligo.start + oligo.length
+            ) > genome.size()) {
+            continue;
+        }
+
+        possible_positions += oligo.length;
+
+        const std::string target_subsequence = genome.substr(
+            static_cast<std::size_t>(oligo.start),
+            static_cast<std::size_t>(oligo.length));
+        const bool target_is_valid = std::all_of(
+            target_subsequence.begin(), target_subsequence.end(), is_acgt);
+        if (target_is_valid) {
+            auto cached = binding_dg_cache.find(target_subsequence);
+            if (cached == binding_dg_cache.end()) {
+                cached = binding_dg_cache.emplace(
+                    target_subsequence,
+                    Thal::compute_dimer_dg(oligo.seq, target_subsequence)
+                ).first;
+            }
+            binding_ddg_sum += cached->second - perfect_binding_dg;
+            ++binding_ddg_count;
+        }
+
+        bool has_valid_position = false;
+        bool has_any_mismatch = false;
+        bool has_3prime_mismatch = false;
+
+        for (int j = 0; j < oligo.length; ++j) {
+
+            const char primer_base = oligo.seq[j];
+
+            /*
+             * IMPORTANT:
+             *
+             * Your current extract_oligo() stores o.seq as the
+             * forward-template substring for BOTH left and right
+             * primers.
+             *
+             * Therefore we compare directly against the same
+             * forward-reference coordinate here.
+             */
+            const char genome_base =
+                genome[oligo.start + j];
+
+            if (!is_acgt(primer_base) ||
+                !is_acgt(genome_base)) {
+                continue;
+            }
+
+            has_valid_position = true;
+
+            const bool mismatch =
+                primer_base != genome_base;
+
+            /*
+             * LEFT primer:
+             *
+             * reference:
+             *     5' -----------------> 3'
+             *                            ^
+             *                         primer 3'
+             *
+             * so increasing j approaches the 3' end.
+             *
+             *
+             * RIGHT primer:
+             *
+             * stored sequence is still the forward-template
+             * substring:
+             *
+             * reference:
+             *     5' -----------------> 3'
+             *         ^
+             *      primer 3'
+             *
+             * so j=0 corresponds to the reverse primer's 3' end.
+             */
+            const int distance_from_3prime =
+                is_right
+                    ? j
+                    : (oligo.length - 1 - j);
+
+            const double weight =
+                mismatch_weight_from_3prime(
+                    distance_from_3prime
+                );
+
+            valid_positions += 1.0;
+            weighted_positions += weight;
+
+            if (mismatch) {
+                mismatches += 1.0;
+                weighted_mismatches += weight;
+
+                has_any_mismatch = true;
+
+                if (distance_from_3prime <
+                    THREE_PRIME_WINDOW) {
+                    has_3prime_mismatch = true;
+                }
+            }
+        }
+
+        if (has_valid_position) {
+            ++evaluated_genomes;
+
+            if (has_any_mismatch)
+                ++genomes_with_any_mismatch;
+
+            if (has_3prime_mismatch)
+                ++genomes_with_3prime_mismatch;
+        }
+    }
+
+    if (valid_positions > 0.0) {
+        oligo.mismatch_rate =
+            mismatches / valid_positions;
+    } else {
+        oligo.mismatch_rate = 1.0;
+    }
+
+    oligo.coverage_rate =
+        possible_positions > 0.0
+            ? valid_positions / possible_positions
+            : 0.0;
+
+    if (weighted_positions > 0.0) {
+        oligo.weighted_mismatch =
+            weighted_mismatches /
+            weighted_positions;
+    } else {
+        oligo.weighted_mismatch = 1.0;
+    }
+
+    oligo.mean_binding_ddg = binding_ddg_count > 0
+        ? binding_ddg_sum / static_cast<double>(binding_ddg_count)
+        : std::numeric_limits<double>::quiet_NaN();
+
+    if (evaluated_genomes > 0) {
+
+        oligo.genome_mismatch_rate =
+            static_cast<double>(
+                genomes_with_any_mismatch
+            ) /
+            static_cast<double>(
+                evaluated_genomes
+            );
+
+        oligo.mismatch_3prime_rate =
+            static_cast<double>(
+                genomes_with_3prime_mismatch
+            ) /
+            static_cast<double>(
+                evaluated_genomes
+            );
+
+    } else {
+
+        oligo.genome_mismatch_rate = 1.0;
+        oligo.mismatch_3prime_rate = 1.0;
+    }
 }
 
 RemovalSets computeRemoval(const std::vector<const Result*>& output_results,
@@ -619,6 +830,16 @@ std::vector<PrimerOutput> filterByDG_relax(
                 summary.final_right++;
             }
 
+        filtered_output.pairs_required = original.pairs_required;
+        filtered_output.segment_id = original.segment_id;
+        filtered_output.pdr_left = original.pdr_left;
+        filtered_output.pdr_right = original.pdr_right;
+        if (filtered_output.pairs_required) {
+            retain_surviving_pairs(filtered_output);
+            if (filtered_output.pairs.empty())
+                throw std::runtime_error("Off-target filtering left no valid candidate pair for output " + std::to_string(output_idx));
+            summary.final_pairs = filtered_output.pairs.size();
+        }
         total_pairs_kept += summary.final_pairs;
         total_left_kept  += summary.final_left;
         total_right_kept += summary.final_right;
@@ -888,4 +1109,564 @@ void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& 
     }
 
     std::cout << "Solution written to: " << filename << "\n";
+}
+
+static std::string xml_escape(const std::string& text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (char c : text) {
+        switch (c) {
+            case '&':  escaped += "&amp;";  break;
+            case '<':  escaped += "&lt;";   break;
+            case '>':  escaped += "&gt;";   break;
+            case '\"': escaped += "&quot;"; break;
+            case '\'': escaped += "&apos;"; break;
+            default:   escaped += c;        break;
+        }
+    }
+    return escaped;
+}
+
+void save_coverage_report(const std::vector<SegmentContext>& segments,
+                          const std::vector<PrimerResult>& solution,
+                          const std::string& output_prefix) {
+    struct Amplicon {
+        std::size_t index;
+        std::size_t start;
+        std::size_t end;
+        std::size_t left_start;
+        std::size_t left_end;
+        std::size_t right_start;
+        std::size_t right_end;
+        std::size_t pool;
+        Oligo left;
+        Oligo right;
+        bool valid;
+        std::string problem;
+    };
+
+    const std::string tsv_name = output_prefix + ".coverage.tsv";
+    const std::string svg_name = output_prefix + ".coverage.svg";
+    const std::string variation_name = output_prefix + ".variation.tsv";
+    std::ofstream tsv(tsv_name);
+    std::ofstream svg(svg_name);
+    std::ofstream variation_out(variation_name);
+    if (!tsv || !svg || !variation_out) {
+        std::cerr << "Error: could not create coverage report files\n";
+        return;
+    }
+
+    constexpr double X0 = 170.0;
+    constexpr double PIXELS_PER_BASE = 2.0;
+    constexpr double RIGHT_MARGIN = 50.0;
+    constexpr double ROW_HEIGHT = 105.0;
+    constexpr double SEGMENT_HEADER_HEIGHT = 42.0;
+    std::size_t maximum_template_length = 0;
+    for (const auto& segment : segments) {
+        maximum_template_length = std::max(
+            maximum_template_length, segment.tmpl.size());
+    }
+    const double svg_width = X0 + RIGHT_MARGIN +
+        std::max(1.0, maximum_template_length * PIXELS_PER_BASE);
+    const std::size_t total_rows = segments.size();
+    const double svg_height = 45.0 +
+        total_rows * ROW_HEIGHT +
+        segments.size() * (SEGMENT_HEADER_HEIGHT + 15.0);
+
+    svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\""
+        << svg_width << "\" height=\"" << svg_height
+        << "\" viewBox=\"0 0 " << svg_width << " " << svg_height << "\">\n"
+        << "<style>text{font-family:Arial,sans-serif;font-size:12px}"
+        << ".title{font-size:18px;font-weight:bold}.label{font-weight:bold}"
+        << ".axis{stroke:#334155;stroke-width:1}.gap{fill:#ef4444;opacity:.75}"
+        << ".p1{fill:#2563eb;stroke:#1d4ed8}.p2{fill:#16a34a;stroke:#15803d}"
+        << ".primer{cursor:pointer}.primer-label{font-size:10px;pointer-events:none}"
+        << ".primer:hover{opacity:.78}.primer-tooltip text{font-size:12px;fill:#f8fafc}"
+        << ".primer-tooltip .heading{font-weight:bold;font-size:13px}"
+        << ".primer-tooltip .sequence{font-family:Consolas,monospace;white-space:pre}"
+        << ".invalid{fill:#9ca3af;stroke:#dc2626;stroke-width:2}</style>\n"
+        << "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n"
+        << "<text x=\"20\" y=\"27\" class=\"title\">Multiplex amplicon coverage</text>\n"
+        << "<text x=\"430\" y=\"27\">Variation: pale = conserved, red = variable, gray = no valid calls</text>\n";
+
+    tsv << "record\tsegment\tindex\tstart\tend\tlength\tpool\tvalid"
+        << "\tcovered_bases\tcoverage_percent\tgap_count\tproblem\n";
+    variation_out
+        << "segment\tposition\ttemplate_base\tvalid_sequences\ttotal_sequences"
+        << "\tvariation_rate\tmissing_rate\tA\tC\tG\tT\n";
+
+    double segment_top = 48.0;
+    for (std::size_t segment_id = 0; segment_id < segments.size(); ++segment_id) {
+        const auto& segment = segments[segment_id];
+        const std::size_t template_length = segment.tmpl.size();
+        std::vector<Amplicon> amplicons;
+
+        struct SiteVariation {
+            std::size_t valid = 0;
+            std::size_t counts[4] = {0, 0, 0, 0};
+            double variation = 0.0;
+            double missing = 1.0;
+        };
+        std::vector<SiteVariation> site_variation(template_length);
+
+        auto base_index = [](char base) -> int {
+            switch (static_cast<char>(std::toupper(
+                        static_cast<unsigned char>(base)))) {
+                case 'A': return 0;
+                case 'C': return 1;
+                case 'G': return 2;
+                case 'T': return 3;
+                default:  return -1;
+            }
+        };
+
+        for (std::size_t pos = 0; pos < template_length; ++pos) {
+            SiteVariation& site = site_variation[pos];
+            for (const std::string& sequence : segment.sequences) {
+                if (pos >= sequence.size()) continue;
+                const int index = base_index(sequence[pos]);
+                if (index < 0) continue;
+                ++site.counts[index];
+                ++site.valid;
+            }
+
+            if (site.valid > 0) {
+                const std::size_t major = *std::max_element(
+                    std::begin(site.counts), std::end(site.counts));
+                site.variation = 1.0 -
+                    static_cast<double>(major) /
+                    static_cast<double>(site.valid);
+            }
+            if (!segment.sequences.empty()) {
+                site.missing = 1.0 -
+                    static_cast<double>(site.valid) /
+                    static_cast<double>(segment.sequences.size());
+            }
+
+            variation_out << segment.name << "\t" << pos << "\t"
+                << (pos < segment.tmpl.size() ? segment.tmpl[pos] : 'N') << "\t"
+                << site.valid << "\t" << segment.sequences.size() << "\t"
+                << std::fixed << std::setprecision(6) << site.variation << "\t"
+                << site.missing << "\t" << site.counts[0] << "\t"
+                << site.counts[1] << "\t" << site.counts[2] << "\t"
+                << site.counts[3] << "\n";
+        }
+
+        for (const PrimerResult& result : solution) {
+            if (result.segment_id != segment_id) continue;
+
+            Amplicon amp{};
+            amp.left_start  = result.left.start;
+            amp.left_end    = result.left.start + result.left.length;
+            amp.right_start = result.right.start;
+            amp.right_end   = result.right.start + result.right.length;
+            amp.start       = amp.left_start;
+            amp.end         = amp.right_end;
+            amp.pool        = result.pool;
+            amp.left        = result.left;
+            amp.right       = result.right;
+            amp.valid       = true;
+
+            if (result.left.length == 0 || result.right.length == 0) {
+                amp.valid = false;
+                amp.problem = "zero-length primer";
+            } else if (amp.left_start >= amp.right_start) {
+                amp.valid = false;
+                amp.problem = "invalid primer orientation/order";
+            } else if (amp.left_end > template_length ||
+                       amp.right_end > template_length) {
+                amp.valid = false;
+                amp.problem = "primer outside template bounds";
+            }
+            amplicons.push_back(std::move(amp));
+        }
+
+        std::sort(amplicons.begin(), amplicons.end(),
+                  [](const Amplicon& a, const Amplicon& b) {
+                      if (a.start != b.start) return a.start < b.start;
+                      return a.end < b.end;
+                  });
+
+        // Match save_solution() BED numbering: genomic order within segment.
+        for (std::size_t i = 0; i < amplicons.size(); ++i) {
+            amplicons[i].index = i + 1;
+        }
+
+        std::vector<std::pair<std::size_t, std::size_t>> merged;
+        for (const Amplicon& amp : amplicons) {
+            if (!amp.valid) continue;
+            if (merged.empty() || amp.start > merged.back().second) {
+                merged.push_back({amp.start, amp.end});
+            } else {
+                merged.back().second = std::max(merged.back().second, amp.end);
+            }
+        }
+
+        std::vector<std::pair<std::size_t, std::size_t>> gaps;
+        std::size_t cursor = 0;
+        std::size_t covered = 0;
+        for (const auto& interval : merged) {
+            if (cursor < interval.first) gaps.push_back({cursor, interval.first});
+            covered += interval.second - interval.first;
+            cursor = interval.second;
+        }
+        if (cursor < template_length) gaps.push_back({cursor, template_length});
+
+        const double coverage_percent = template_length == 0
+            ? 0.0
+            : 100.0 * static_cast<double>(covered) /
+              static_cast<double>(template_length);
+
+        tsv << "SUMMARY\t" << segment.name << "\t.\t0\t"
+            << template_length << "\t" << template_length << "\t.\t.\t"
+            << covered << "\t" << std::fixed << std::setprecision(3)
+            << coverage_percent << "\t" << gaps.size() << "\t.\n";
+
+        for (const Amplicon& amp : amplicons) {
+            tsv << "AMPLICON\t" << segment.name << "\t" << amp.index << "\t"
+                << amp.start << "\t" << amp.end << "\t"
+                << (amp.end >= amp.start ? amp.end - amp.start : 0) << "\t"
+                << amp.pool << "\t" << (amp.valid ? 1 : 0)
+                << "\t.\t.\t.\t" << (amp.problem.empty() ? "." : amp.problem)
+                << "\n";
+        }
+        for (const auto& gap : gaps) {
+            tsv << "GAP\t" << segment.name << "\t.\t" << gap.first << "\t"
+                << gap.second << "\t" << gap.second - gap.first
+                << "\t.\t.\t.\t.\t.\tuncovered\n";
+        }
+
+        svg << "<text x=\"20\" y=\"" << segment_top + 14
+            << "\" class=\"label\">" << xml_escape(segment.name) << "</text>\n"
+            << "<text x=\"20\" y=\"" << segment_top + 31
+            << "\">" << covered << "/" << template_length << " bp ("
+            << std::fixed << std::setprecision(2) << coverage_percent
+            << "%), gaps: " << gaps.size() << "</text>\n";
+
+        // Draw the entire template on one continuous axis. The SVG canvas is
+        // intentionally wider than the viewport so it can be inspected with
+        // horizontal scrolling at per-primer resolution.
+        constexpr std::size_t row_count = 1;
+        const double plot_width =
+            std::max(1.0, template_length * PIXELS_PER_BASE);
+
+        for (std::size_t row = 0; row < row_count; ++row) {
+            const std::size_t row_start = 0;
+            const std::size_t row_end = template_length;
+            const std::size_t row_length = std::max<std::size_t>(1, row_end - row_start);
+            const double base_y = segment_top + SEGMENT_HEADER_HEIGHT + row * ROW_HEIGHT;
+
+            auto xpos = [&](std::size_t position) {
+                const std::size_t clipped = std::min(
+                    row_end, std::max(row_start, position));
+                return X0 + plot_width *
+                    static_cast<double>(clipped - row_start) /
+                    static_cast<double>(row_length);
+            };
+
+            svg << "<line x1=\"" << X0 << "\" y1=\"" << base_y
+                << "\" x2=\"" << X0 + plot_width << "\" y2=\""
+                << base_y << "\" class=\"axis\"/>\n";
+
+            // Per-site variation heatmap. The theoretical maximum for four
+            // equally frequent bases is 0.75, which maps to saturated red.
+            for (std::size_t pos = row_start; pos < row_end; ++pos) {
+                const SiteVariation& site = site_variation[pos];
+                const double normalized = std::min(1.0, site.variation / 0.75);
+                const int red   = 255;
+                const int green = static_cast<int>(255.0 * (1.0 - normalized));
+                const int blue  = static_cast<int>(220.0 * (1.0 - normalized));
+                const double x1 = xpos(pos);
+                const double x2 = xpos(pos + 1);
+
+                svg << "<rect x=\"" << x1 << "\" y=\"" << base_y + 10
+                    << "\" width=\"" << std::max(0.05, x2 - x1)
+                    << "\" height=\"10\" fill=\"";
+                if (site.valid == 0) svg << "#94a3b8";
+                else svg << "rgb(" << red << "," << green << "," << blue << ")";
+                svg << "\"><title>Position " << pos
+                    << "; template " << xml_escape(std::string(1, segment.tmpl[pos]))
+                    << "; variation " << std::fixed << std::setprecision(4)
+                    << site.variation << "; missing " << site.missing
+                    << "; A/C/G/T " << site.counts[0] << "/" << site.counts[1]
+                    << "/" << site.counts[2] << "/" << site.counts[3]
+                    << "</title></rect>\n";
+            }
+
+            for (const auto& gap : gaps) {
+                const std::size_t start = std::max(gap.first, row_start);
+                const std::size_t end = std::min(gap.second, row_end);
+                if (start >= end) continue;
+                svg << "<rect x=\"" << xpos(start) << "\" y=\""
+                    << base_y - 5 << "\" width=\""
+                    << std::max(1.0, xpos(end) - xpos(start))
+                    << "\" height=\"10\" class=\"gap\"><title>Gap "
+                    << gap.first << "-" << gap.second << " ("
+                    << gap.second - gap.first << " bp)</title></rect>\n";
+            }
+
+            for (const Amplicon& amp : amplicons) {
+                const std::size_t visible_start = std::max(amp.start, row_start);
+                const std::size_t visible_end = std::min(amp.end, row_end);
+                if (visible_start >= visible_end) continue;
+
+                const double y = base_y + (amp.pool == 2 ? 68.0 : 41.0);
+                const std::string cls = amp.valid
+                    ? (amp.pool == 2 ? "p2" : "p1") : "invalid";
+                svg << "<rect x=\"" << xpos(visible_start) << "\" y=\"" << y
+                    << "\" width=\""
+                    << std::max(1.0, xpos(visible_end) - xpos(visible_start))
+                    << "\" height=\"12\" rx=\"2\" class=\"" << cls
+                    << "\"><title>Amplicon " << amp.index << ", pool " << amp.pool
+                    << ": " << amp.start << "-" << amp.end;
+                if (!amp.problem.empty()) svg << "; " << xml_escape(amp.problem);
+                svg << "</title></rect>\n";
+
+                auto primer_detail_attributes = [&](const Oligo& oligo,
+                                                     std::size_t start,
+                                                     std::size_t end,
+                                                     bool is_right) {
+                    const std::string primer_sequence = is_right
+                        ? revcomp(oligo.seq) : oligo.seq;
+                    std::string target_sequence;
+                    target_sequence.reserve(primer_sequence.size());
+                    for (char base : primer_sequence) {
+                        target_sequence.push_back(comp(base));
+                    }
+
+                    std::ostringstream variation;
+                    std::ostringstream positions;
+                    variation << std::fixed << std::setprecision(1);
+                    for (std::size_t j = 0; j < primer_sequence.size(); ++j) {
+                        if (j != 0) {
+                            variation << ',';
+                            positions << ',';
+                        }
+                        const std::size_t position = is_right
+                            ? end - 1 - j : start + j;
+                        positions << position;
+                        variation << (position < site_variation.size()
+                            ? 100.0 * site_variation[position].variation : 0.0);
+                    }
+
+                    std::ostringstream attributes;
+                    attributes << " data-primer-seq=\""
+                               << xml_escape(primer_sequence)
+                               << "\" data-target-seq=\""
+                               << xml_escape(target_sequence)
+                               << "\" data-site-variation=\""
+                               << variation.str()
+                               << "\" data-site-positions=\""
+                               << positions.str() << "\"";
+                    return attributes.str();
+                };
+
+                if (amp.valid && amp.left_end > row_start && amp.left_start < row_end) {
+                    const double lx1 = xpos(amp.left_start);
+                    const double lx2 = xpos(amp.left_end);
+                    svg << "<polygon points=\"" << lx1 << "," << y - 3 << " "
+                        << lx1 << "," << y + 15 << " " << lx2 << "," << y + 6
+                        << "\" fill=\"#0f172a\" class=\"primer\""
+                        << primer_detail_attributes(amp.left, amp.left_start,
+                                                    amp.left_end, false)
+                        << "><title>LEFT primer "
+                        << amp.index << "&#10;Pool: " << amp.pool
+                        << "&#10;Sequence: " << xml_escape(amp.left.seq)
+                        << "&#10;Coordinates: " << amp.left_start << "-"
+                        << amp.left_end << "&#10;Length: " << amp.left.length
+                        << "&#10;Tm: " << std::fixed << std::setprecision(2)
+                        << amp.left.tm << " C&#10;GC: " << amp.left.gc
+                        << "%&#10;Mismatch: " << std::setprecision(4)
+                        << amp.left.mismatch_rate << "&#10;Mean binding ddG: "
+                        << amp.left.mean_binding_ddg << " cal/mol&#10;Genome mismatch: "
+                        << amp.left.genome_mismatch_rate << "&#10;3prime mismatch: "
+                        << amp.left.mismatch_3prime_rate << "&#10;Weighted mismatch: "
+                        << amp.left.weighted_mismatch << "&#10;Coverage: "
+                        << amp.left.coverage_rate
+                        << "</title></polygon>\n";
+                    svg << "<text x=\"" << (lx1 + lx2) / 2.0
+                        << "\" y=\"" << y - 5
+                        << "\" text-anchor=\"middle\" class=\"primer-label\">L"
+                        << amp.index << "</text>\n";
+                }
+                if (amp.valid && amp.right_end > row_start && amp.right_start < row_end) {
+                    const double rx1 = xpos(amp.right_start);
+                    const double rx2 = xpos(amp.right_end);
+                    svg << "<polygon points=\"" << rx2 << "," << y - 3 << " "
+                        << rx2 << "," << y + 15 << " " << rx1 << "," << y + 6
+                        << "\" fill=\"#0f172a\" class=\"primer\""
+                        << primer_detail_attributes(amp.right, amp.right_start,
+                                                    amp.right_end, true)
+                        << "><title>RIGHT primer "
+                        << amp.index << "&#10;Pool: " << amp.pool
+                        << "&#10;Sequence: " << xml_escape(amp.right.seq)
+                        << "&#10;Coordinates: " << amp.right_start << "-"
+                        << amp.right_end << "&#10;Length: " << amp.right.length
+                        << "&#10;Tm: " << std::fixed << std::setprecision(2)
+                        << amp.right.tm << " C&#10;GC: " << amp.right.gc
+                        << "%&#10;Mismatch: " << std::setprecision(4)
+                        << amp.right.mismatch_rate << "&#10;Mean binding ddG: "
+                        << amp.right.mean_binding_ddg << " cal/mol&#10;Genome mismatch: "
+                        << amp.right.genome_mismatch_rate << "&#10;3prime mismatch: "
+                        << amp.right.mismatch_3prime_rate << "&#10;Weighted mismatch: "
+                        << amp.right.weighted_mismatch << "&#10;Coverage: "
+                        << amp.right.coverage_rate
+                        << "</title></polygon>\n";
+                    svg << "<text x=\"" << (rx1 + rx2) / 2.0
+                        << "\" y=\"" << y - 5
+                        << "\" text-anchor=\"middle\" class=\"primer-label\">R"
+                        << amp.index << "</text>\n";
+                }
+            }
+
+            svg << "<text x=\"105\" y=\"" << base_y + 19
+                << "\">Variation</text>\n"
+                << "<text x=\"120\" y=\"" << base_y + 52
+                << "\" fill=\"#2563eb\">Pool 1</text>\n"
+                << "<text x=\"120\" y=\"" << base_y + 79
+                << "\" fill=\"#16a34a\">Pool 2</text>\n"
+                << "<text x=\"" << X0 << "\" y=\"" << base_y + 100
+                << "\">" << row_start << "</text><text x=\""
+                << X0 + plot_width << "\" y=\"" << base_y + 100
+                << "\" text-anchor=\"end\">" << row_end << " bp</text>\n";
+        }
+
+        segment_top += SEGMENT_HEADER_HEIGHT + row_count * ROW_HEIGHT + 15.0;
+    }
+
+    // A native SVG <title> is useful as a no-script fallback, but its tooltip
+    // is delayed and varies by viewer.  Upgrade primer titles to a consistent,
+    // pointer-following tooltip when the SVG is opened in a browser.
+    svg << R"SVG(<g id="primer-tooltip" class="primer-tooltip" visibility="hidden" pointer-events="none">
+<rect x="0" y="0" width="10" height="10" rx="4" fill="#0f172a" opacity="0.96"/>
+<text x="10" y="18"></text>
+</g>
+<script><![CDATA[
+(function () {
+  const root = document.documentElement;
+  const tooltip = document.getElementById('primer-tooltip');
+  const box = tooltip.querySelector('rect');
+  const text = tooltip.querySelector('text');
+  const padding = 10;
+  const lineHeight = 17;
+
+  function point(event) {
+    const p = root.createSVGPoint();
+    p.x = event.clientX;
+    p.y = event.clientY;
+    return p.matrixTransform(root.getScreenCTM().inverse());
+  }
+
+  function visibleBounds() {
+    const rect = root.getBoundingClientRect();
+    const matrix = root.getScreenCTM().inverse();
+    const corner = function (clientX, clientY) {
+      const p = root.createSVGPoint();
+      p.x = clientX;
+      p.y = clientY;
+      return p.matrixTransform(matrix);
+    };
+    const topLeft = corner(Math.max(0, rect.left) + 4,
+                           Math.max(0, rect.top) + 4);
+    const bottomRight = corner(Math.min(window.innerWidth, rect.right) - 4,
+                               Math.min(window.innerHeight, rect.bottom) - 4);
+    return {
+      left: topLeft.x,
+      top: topLeft.y,
+      right: bottomRight.x,
+      bottom: bottomRight.y
+    };
+  }
+
+  function move(event) {
+    const p = point(event);
+    const bounds = text.getBBox();
+    const visible = visibleBounds();
+    const width = bounds.width + padding * 2;
+    const height = bounds.height + padding * 2;
+    let x = p.x + 14;
+    let y = p.y + 14;
+    if (x + width > visible.right) x = p.x - width - 14;
+    if (y + height > visible.bottom) y = p.y - height - 14;
+    x = Math.max(visible.left, Math.min(x, visible.right - width));
+    y = Math.max(visible.top, Math.min(y, visible.bottom - height));
+    tooltip.setAttribute('transform', `translate(${x},${y})`);
+  }
+
+  document.querySelectorAll('.primer').forEach(function (primer) {
+    const title = primer.querySelector('title');
+    if (!title) return;
+    const detail = title.textContent;
+    primer.setAttribute('aria-label', detail.replace(/\n/g, '; '));
+    title.remove();
+
+    primer.addEventListener('pointerenter', function (event) {
+      text.replaceChildren();
+      const metadata = Object.fromEntries(detail.split('\n').slice(1).map(function (line) {
+        const separator = line.indexOf(':');
+        return separator < 0 ? [line, ''] : [line.slice(0, separator), line.slice(separator + 1).trim()];
+      }));
+      const primerBases = (primer.dataset.primerSeq || '').split('');
+      const targetBases = (primer.dataset.targetSeq || '').split('');
+      const positions = (primer.dataset.sitePositions || '').split(',');
+      const variation = (primer.dataset.siteVariation || '').split(',');
+      const cellWidth = 1 + Math.max(3, ...positions.concat(variation).map(function (value) {
+        return String(value).length;
+      }));
+      const availableWidth = Math.max(240, window.innerWidth - 32);
+      const columnsPerBlock = Math.max(4, Math.floor(
+        (availableWidth - 100) / (cellWidth * 7.25)));
+      const tokenRow = function (label, values) {
+        return label.padEnd(12) + values.map(function (value) {
+          return String(value).padStart(cellWidth);
+        }).join('');
+      };
+      const lines = [
+        detail.split('\n')[0],
+        'Pool ' + metadata.Pool + '  |  Coordinates ' + metadata.Coordinates,
+        'Tm ' + metadata.Tm + '  |  GC ' + metadata.GC,
+        'Mismatch ' + metadata.Mismatch + '  |  Weighted ' +
+          metadata['Weighted mismatch'] + '  |  Coverage ' + metadata.Coverage,
+        'Genome mismatch ' + metadata['Genome mismatch'] +
+          "  |  3' mismatch " + metadata['3prime mismatch'],
+        'Mean binding ddG ' + metadata['Mean binding ddG']
+      ];
+      for (let start = 0; start < primerBases.length; start += columnsPerBlock) {
+        const end = start + columnsPerBlock;
+        lines.push(tokenRow('Position', positions.slice(start, end)));
+        lines.push(tokenRow("Primer 5'", primerBases.slice(start, end)));
+        lines.push(tokenRow("Target 3'", targetBases.slice(start, end)));
+        lines.push(tokenRow('Variation %', variation.slice(start, end)));
+      }
+      lines.forEach(function (line, index) {
+        const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+        tspan.setAttribute('x', padding);
+        tspan.setAttribute('y', padding + 13 + index * lineHeight);
+        if (index === 0) tspan.setAttribute('class', 'heading');
+        if (index >= 2) {
+          tspan.setAttribute('class', 'sequence');
+          tspan.setAttributeNS('http://www.w3.org/XML/1998/namespace',
+                               'xml:space', 'preserve');
+        }
+        tspan.textContent = line;
+        text.appendChild(tspan);
+      });
+      const bounds = text.getBBox();
+      box.setAttribute('width', bounds.width + padding * 2);
+      box.setAttribute('height', bounds.height + padding * 2);
+      tooltip.setAttribute('visibility', 'visible');
+      move(event);
+    });
+    primer.addEventListener('pointermove', move);
+    primer.addEventListener('pointerleave', function () {
+      tooltip.setAttribute('visibility', 'hidden');
+    });
+  });
+}());
+]]></script>
+</svg>
+)SVG";
+    std::cout << "Coverage plot written to: " << svg_name << "\n"
+              << "Coverage audit written to: " << tsv_name << "\n"
+              << "Site variation written to: " << variation_name << "\n";
 }

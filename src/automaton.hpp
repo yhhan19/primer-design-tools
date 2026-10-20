@@ -37,6 +37,18 @@ private:
     std::size_t ch;
 };
 
+struct AmpliconPrimerPair {
+    std::string first_label, second_label;
+    bool first_is_right = false, second_is_right = true;
+    std::size_t output_index = 0, candidate_pair_index = 0;
+};
+struct AmpliconHit {
+    std::size_t pair_index = 0;
+    std::string contig;
+    std::size_t start = 0, end = 0;  // Global zero-based, half-open product interval.
+    Result forward_hit, reverse_hit;  // Genomic order, not candidate F/R names.
+};
+
 class Automaton {
 public:
     Automaton(const std::vector<std::string> &labels, 
@@ -50,17 +62,17 @@ public:
                                std::size_t chunk_size, 
                                std::size_t io_block_size, 
                                std::size_t nthreads);
-    std::vector<Result> search_paired(const std::string& path,
-                                        std::size_t overlap,
-                                        std::size_t threshold,
-                                        double dg_thres,
-                                        std::size_t amp_min,
-                                        std::size_t amp_max,
-                                        std::size_t chunk_size,
-                                        std::size_t io_block_size,
-                                        std::size_t nthreads);
 
+    // Paired binding is evaluated within one overlapped chunk. The original
+    // single-hit search entry point and implementation are unchanged.
+    std::vector<AmpliconHit> search_amplicons(const std::string& path,
+        const std::vector<AmpliconPrimerPair>& pairs, std::size_t threshold,
+        double dg_cutoff, std::size_t amp_min, std::size_t amp_max,
+        std::size_t chunk_size, std::size_t io_block_size, std::size_t nthreads);
 private:
+    std::vector<AmpliconHit> search_chunk_amplicons(const Task& chunk,
+        const std::vector<AmpliconPrimerPair>& pairs, std::size_t owned_length,
+        std::size_t threshold, double dg_cutoff, std::size_t amp_min, std::size_t amp_max);
     std::size_t search_chunk(const std::string& contig,
                              const char* data,
                              std::size_t len,
@@ -75,30 +87,10 @@ private:
                                              std::size_t chunk_size, 
                                              std::size_t io_block_size,
                                              std::size_t nthreads);
-    std::size_t search_chunk_paired(const std::string& contig,
-                                                const char* data,
-                                                std::size_t len,
-                                                std::size_t index,
-                                                std::size_t threshold,
-                                                double dg_thres,
-                                                std::size_t amp_min,
-                                                std::size_t amp_max,
-                                                std::vector<Result>& local_results);
-    std::vector<Result> process_fasta_chunks_paired(const std::string &path, 
-                                             std::size_t overlap, 
-                                             std::size_t threshold,
-                                             double dg_thres,
-                                             std::size_t amp_min,
-                                             std::size_t amp_max,
-                                             std::size_t chunk_size, 
-                                             std::size_t io_block_size,
-                                             std::size_t nthreads);
 private:
     AutomatonNode *root;
     std::vector<std::string> index2label, index2data;
     std::vector<std::size_t> index2pos, index2strand;
     std::unordered_map<std::string, std::size_t> label2index;
-    std::vector<std::size_t> index2pdr;
-    std::vector<bool>        index2lr;
     std::size_t k;  
 };

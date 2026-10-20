@@ -1,6 +1,7 @@
 #pragma once
 #include "utility.hpp"
 #include "bst.hpp"
+#include "rmq2d.hpp"
 
 class RiskOptimizer {
     public:
@@ -63,22 +64,23 @@ class RiskOptimizer {
         std::unordered_map<key_t, risk_t> memo_umap;
         std::unordered_map<key_t, key_t> prev_umap;
         std::vector<std::pair<index_t, risk_t>> *solution_vector;
-        std::vector<index_t> valid_results;
+        std::vector<index_t> left_valid_results;
+        std::vector<index_t> right_valid_results;
+        index_t left_min_candidates = 1;
+        index_t right_min_candidates = 1;
         BST **solutions;
         risk_t *memo;
         key_t *prev;
         index_t size, len, min, max, fumax, rumax;
         risk_t *risk, *prefix_sum;
-        std::size_t *gc;
         Args args;
-        std::vector<index_t> valid_counts_all_pdrs(std::size_t num_threads);
+        void build_primer3_candidate_counts();
         std::vector<index_t> random_PDR();
         index_t greedy_random_between(index_t cmin, index_t cmax);
         risk_t opt(index_t f, index_t r, index_t pf, index_t pr, risk_t u, risk_t alpha);
         risk_t cost(index_t p, risk_t u, risk_t alpha);
-        std::size_t gc_count(index_t p, index_t l);
-        bool gc_valid(index_t p);
-        index_t valid_count_in_pdr(index_t pdr_start);
+        bool left_valid(index_t p) const;
+        bool right_valid(index_t p) const;
         risk_t top_k_opt(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t opt_m(index_t f, index_t r, risk_t u, risk_t alpha);
@@ -86,28 +88,6 @@ class RiskOptimizer {
         bool valid(index_t f, index_t r, index_t f_, index_t r_);
         risk_t top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
 
-        std::vector<risk_t> row_prefix_;
-        std::vector<key_t>  row_prefix_key_;
-        index_t             row_prefix_band_ = 0;
-
-        void init_row_prefix(index_t band) {
-            if (band == row_prefix_band_) {
-                std::fill(row_prefix_.begin(),     row_prefix_.end(),     INF);
-                std::fill(row_prefix_key_.begin(), row_prefix_key_.end(), 0);
-                return;
-            }
-            row_prefix_band_ = band;
-            row_prefix_.assign((size + 1) * (band + 1), INF);
-            row_prefix_key_.assign((size + 1) * (band + 1), 0);
-        }
-
-        risk_t& rp(index_t r, index_t fi) {
-            return row_prefix_[r * (row_prefix_band_ + 1) + fi];
-        }
-
-        key_t& rpk(index_t r, index_t fi) {
-            return row_prefix_key_[r * (row_prefix_band_ + 1) + fi];
-        }
-
+        std::unique_ptr<MidpointRMQ2D<risk_t, key_t>> midpoint_rmq_;
         risk_t top_k_opt_mi_fast(risk_t u, std::vector<index_t>& min_PDR, risk_t alpha);
 };

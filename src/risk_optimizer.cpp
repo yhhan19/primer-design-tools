@@ -8,18 +8,16 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
                              index_t fumax,
                              index_t rumax,
                              const Args &args) {
+    this->args = args;
     std::vector<risk_t> input = compute_risk(data);
     this->tmpl = msa_consensus(data);
     size = input.size();
     risk = new risk_t[size];
     prefix_sum = new risk_t[size + 1];
     prefix_sum[0] = 0;
-    gc = new std::size_t[size + 1];
-    gc[0] = 0;
     for (index_t i = 0; i < input.size(); i ++) {
         risk[i] = input[i];
         prefix_sum[i + 1] = prefix_sum[i] + risk[i];
-        gc[i + 1] = gc[i] + (is_gc(tmpl[i]) ? 1 : 0);
     }
     this->len = len;
     this->min = min;
@@ -30,8 +28,7 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
     prev = new key_t[KEY_LIMIT];
     solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
     solutions = new BST*[size];
-    this->args = args;
-    valid_results = valid_counts_all_pdrs(4);
+    build_primer3_candidate_counts();
 }
 
 RiskOptimizer::RiskOptimizer(std::vector<risk_t> input, 
@@ -62,89 +59,164 @@ risk_t RiskOptimizer::cost(index_t p, risk_t u, risk_t alpha) {
     return sum2 + u * alpha;
 }
 
-std::size_t RiskOptimizer::gc_count(index_t p, index_t l) {
-    std::size_t count = gc[p + l] - gc[p];
-    return count;
-}
-
-index_t RiskOptimizer::valid_count_in_pdr(index_t pdr_start) {
-    index_t valid_count = 0;
-    for (std::size_t pl = args.p3_min_size; pl <= args.p3_max_size; ++pl) {
-        for (index_t p = pdr_start; p + pl < pdr_start + len; ++p) {
-
-            double r = (double) gc_count(p, pl) / pl * 100;
-            if (r < args.p3_min_gc || r > args.p3_max_gc) continue;
-
-            std::string primer_seq = tmpl.substr(p, pl);
-
-            tm_ret tm_result = oligotm(
-                primer_seq.c_str(),
-                args.dna_conc,
-                args.mv,
-                args.dv,
-                args.dntp,
-                0.0,
-                0.6,
-                0.0,
-                santalucia_auto,
-                santalucia,
-                -10.0
-            );
-
-            if (tm_result.Tm < args.p3_min_tm || tm_result.Tm > args.p3_max_tm) continue;
-
-            ++ valid_count;
-        }
-    }
-    return valid_count;
-}
-
-bool RiskOptimizer::gc_valid(index_t p) {
-    index_t count = valid_results[p];
-    return count >= args.num_return;
-}
-
-std::vector<index_t> RiskOptimizer::valid_counts_all_pdrs(std::size_t num_threads)
-{
-    if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
-
-    std::cout << "Validating PDRs...\n";
-
+void RiskOptimizer::build_primer3_candidate_counts() {
+    std::cout << "Enumerating exact Primer3 candidates for all PDRs...\n";
     if (tmpl.size() < len) {
-        std::cerr << "  ERROR: template shorter than PDR length\n";
-        return {};
+        throw std::runtime_error("template shorter than PDR length");
     }
 
-    std::size_t num_pdrs = tmpl.size() - len;
-    std::size_t chunk    = (num_pdrs + num_threads - 1) / num_threads;
-    std::vector<index_t> results(num_pdrs);
-    std::vector<std::future<void>> futures;
-
-    for (std::size_t t = 0; t < num_threads; ++t) {
-        std::size_t start = t * chunk;
-        std::size_t end   = std::min(start + chunk, num_pdrs);
-        if (start >= end) break;
-
-        futures.push_back(std::async(std::launch::async,
-            [this, &results, start, end]() {
-                for (std::size_t i = start; i < end; ++i)
-                    results[i] = valid_count_in_pdr(i);
-            }
-        ));
+    p3_global_settings* pa = p3_create_global_settings();
+    if (pa == nullptr) {
+        throw std::runtime_error("could not create Primer3 global settings");
     }
-    for (auto& f : futures) f.get();
 
-    index_t     min_c    = *std::min_element(results.begin(), results.end());
-    index_t     max_c    = *std::max_element(results.begin(), results.end());
-    double      avg_c    = (double) std::accumulate(results.begin(), results.end(), 0ULL) / num_pdrs;
-    std::size_t zero_cnt = std::count(results.begin(), results.end(), 0);
+    p3_set_gs_primer_opt_size(pa, args.p3_opt_size);
+    p3_set_gs_primer_min_size(pa, args.p3_min_size);
+    p3_set_gs_primer_max_size(pa, args.p3_max_size);
+    p3_set_gs_primer_opt_tm(pa, args.p3_opt_tm);
+    p3_set_gs_primer_min_tm(pa, args.p3_min_tm);
+    p3_set_gs_primer_max_tm(pa, args.p3_max_tm);
+    p3_set_gs_primer_min_gc(pa, args.p3_min_gc);
+    p3_set_gs_primer_max_gc(pa, args.p3_max_gc);
+    pa->p_args.salt_conc     = args.mv;
+    pa->p_args.divalent_conc = args.dv;
+    pa->p_args.dntp_conc     = args.dntp;
+    pa->p_args.dna_conc      = args.dna_conc;
+    pa->primer_task          = pick_primer_list;
+    pa->pick_left_primer     = 1;
+    pa->pick_right_primer    = 1;
+    pa->pick_internal_oligo  = 0;
 
-    std::cout << "Total PDRs             : " << num_pdrs << "\n"
-              << "Valid count min/avg/max : " << min_c << " / " << avg_c << " / " << max_c << "\n"
-              << "PDRs with 0 valid      : " << zero_cnt
-              << "(" << (100.0 * zero_cnt / num_pdrs) << " %)\n\n";
+    seq_args* sa = create_seq_arg();
+    sa->sequence = strdup(tmpl.c_str());
+    sa->sequence_name = strdup("pdr_candidate_preprocessing");
 
-    return results;
+    p3retval* retval = choose_primers(pa, sa);
+    if (retval == nullptr) {
+        destroy_seq_args(sa);
+        p3_destroy_global_settings(pa);
+        throw std::runtime_error("Primer3 returned null during PDR preprocessing");
+    }
+
+    std::string error;
+    if (retval->glob_err.data) error += retval->glob_err.data;
+    if (retval->per_sequence_err.data) {
+        if (!error.empty()) error += "; ";
+        error += retval->per_sequence_err.data;
+    }
+    if (!error.empty()) {
+        destroy_p3retval(retval);
+        destroy_seq_args(sa);
+        p3_destroy_global_settings(pa);
+        throw std::runtime_error("Primer3 PDR preprocessing error: " + error);
+    }
+    if (retval->warnings.data) {
+        std::cerr << "Primer3 PDR preprocessing warning: "
+                  << retval->warnings.data << "\n";
+    }
+
+    const std::size_t num_pdrs = tmpl.size() - len + 1;
+    std::vector<long long> left_diff(num_pdrs + 1, 0);
+    std::vector<long long> right_diff(num_pdrs + 1, 0);
+
+    auto add_to_containing_pdrs = [&](std::vector<long long>& diff,
+                                      std::size_t primer_start,
+                                      std::size_t primer_end) {
+        if (primer_end <= primer_start || primer_end - primer_start > len) return;
+        const std::size_t first = primer_end > len ? primer_end - len : 0;
+        const std::size_t last = std::min(primer_start, num_pdrs - 1);
+        if (first > last) return;
+        ++diff[first];
+        --diff[last + 1];
+    };
+
+    for (int i = 0; i < retval->fwd.num_elem; ++i) {
+        const primer_rec& primer = retval->fwd.oligo[i];
+        if (primer.start < 0 || primer.length <= 0) continue;
+        const std::size_t start = static_cast<std::size_t>(primer.start);
+        add_to_containing_pdrs(left_diff, start, start + primer.length);
+    }
+    for (int i = 0; i < retval->rev.num_elem; ++i) {
+        const primer_rec& primer = retval->rev.oligo[i];
+        if (primer.start < 0 || primer.length <= 0 ||
+            primer.start - primer.length + 1 < 0) continue;
+        const std::size_t start = static_cast<std::size_t>(
+            primer.start - primer.length + 1);
+        add_to_containing_pdrs(right_diff, start, start + primer.length);
+    }
+
+    left_valid_results.resize(num_pdrs);
+    right_valid_results.resize(num_pdrs);
+    long long left_running = 0;
+    long long right_running = 0;
+    for (std::size_t p = 0; p < num_pdrs; ++p) {
+        left_running += left_diff[p];
+        right_running += right_diff[p];
+        left_valid_results[p] = static_cast<index_t>(left_running);
+        right_valid_results[p] = static_cast<index_t>(right_running);
+    }
+
+    auto adaptive_minimum = [](const std::vector<index_t>& counts) {
+        std::vector<index_t> nonzero;
+        nonzero.reserve(counts.size());
+        std::copy_if(counts.begin(), counts.end(),
+                     std::back_inserter(nonzero),
+                     [](index_t count) { return count > 0; });
+        if (nonzero.empty()) return static_cast<index_t>(1);
+        const std::size_t middle = nonzero.size() / 2;
+        std::nth_element(nonzero.begin(), nonzero.begin() + middle, nonzero.end());
+        const index_t median = nonzero[middle];
+        return static_cast<index_t>(std::max<double>(
+            1.0, std::ceil(std::sqrt(static_cast<double>(median)))));
+    };
+
+    left_min_candidates = adaptive_minimum(left_valid_results);
+    right_min_candidates = adaptive_minimum(right_valid_results);
+    const bool user_minimum = args.pdr_min_candidates > 0;
+    if (user_minimum) {
+        left_min_candidates = static_cast<index_t>(args.pdr_min_candidates);
+        right_min_candidates = static_cast<index_t>(args.pdr_min_candidates);
+    }
+
+    auto print_stats = [&](const char* label, const std::vector<index_t>& counts) {
+        std::vector<index_t> sorted = counts;
+        std::sort(sorted.begin(), sorted.end());
+        const index_t minimum = sorted.front();
+        const index_t median = sorted[sorted.size() / 2];
+        const index_t maximum = sorted.back();
+        const double average = static_cast<double>(
+            std::accumulate(sorted.begin(), sorted.end(), 0ULL)) /
+            static_cast<double>(sorted.size());
+        const std::size_t zeros = std::count(sorted.begin(), sorted.end(), 0);
+        std::cout << "  " << label << " min/median/avg/max: "
+                  << minimum << " / " << median << " / " << average
+                  << " / " << maximum << "  | zero: " << zeros << "\n";
+    };
+
+    std::cout << "Primer3 accepted " << retval->fwd.num_elem
+              << " left and " << retval->rev.num_elem
+              << " right oligos across " << num_pdrs << " possible PDRs\n";
+    print_stats("LEFT ", left_valid_results);
+    print_stats("RIGHT", right_valid_results);
+    std::cout << "  " << (user_minimum ? "User" : "Adaptive")
+              << " feasibility minimum: left >= "
+              << left_min_candidates << ", right >= "
+              << right_min_candidates << " candidates\n";
+    std::cout << "\n";
+
+    destroy_p3retval(retval);
+    destroy_seq_args(sa);
+    p3_destroy_global_settings(pa);
+}
+
+bool RiskOptimizer::left_valid(index_t p) const {
+    return p < left_valid_results.size() &&
+           left_valid_results[p] >= left_min_candidates;
+}
+
+bool RiskOptimizer::right_valid(index_t p) const {
+    return p < right_valid_results.size() &&
+           right_valid_results[p] >= right_min_candidates;
 }
 
 RiskOptimizer::~RiskOptimizer() {
@@ -236,10 +308,12 @@ index_t RiskOptimizer::greedy_random_between(index_t cmin, index_t cmax) {
 
 void RiskOptimizer::validate_PDR(std::vector<index_t> PDR) {
     for (index_t i = 0; i < PDR.size(); i ++) {
-        if (! gc_valid(PDR[i])) {
+        const bool has_candidates =
+            (i % 2 == 0) ? left_valid(PDR[i]) : right_valid(PDR[i]);
+        if (!has_candidates) {
             std::cout << i << " " << PDR[i] << "\n";
         }
-        assert(gc_valid(PDR[i]));
+        assert(has_candidates);
         if (i % 2 == 0) {
             if (i == 0) {
                 continue;
@@ -362,7 +436,8 @@ risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, ri
             if (r_ < max) continue;
             index_t f_ = r_ - max;
             if (r < r_ + len || r_ < f + len || f < f_ + len) continue;
-            if (! gc_valid(r) || ! gc_valid(r_) || ! gc_valid(f) || ! gc_valid(f_)) continue;
+            if (!right_valid(r) || !right_valid(r_) ||
+                !left_valid(f) || !left_valid(f_)) continue;
             key_t k = to_key_2(r, r_);
             risk_t min_risk;
             key_t min_key;
@@ -540,79 +615,60 @@ risk_t RiskOptimizer::top_k_opt_mi_fast(risk_t u,
                                     risk_t alpha) {
     min_PDR.clear();
 
-    const index_t band = max - min + 1;
-    init_row_prefix(band);  // reuse allocation across calls
+    const index_t r_first = max;
+    const index_t r_last = size >= len ? size - len : 0;
+    if (r_first > r_last) return INF;
+
+    if (!midpoint_rmq_) {
+        midpoint_rmq_ = std::make_unique<MidpointRMQ2D<risk_t, key_t>>(
+            r_first, r_last, min, max);
+    }
+    midpoint_rmq_->reset();
 
     risk_t all_min_risk = INF;
     key_t  all_min_key  = 0;
 
-    auto f_base_fn = [&](index_t r_) -> index_t {
-        return (r_ >= (index_t)max ? r_ - max : 0);
-    };
+    const index_t terminal_r = size > rumax ? size - rumax : 0;
+    for (index_t r = r_first; r <= r_last; ++r) {
+        const index_t f_first = r - max;
+        const index_t f_last = r - min;
 
-    for (index_t r = (index_t)max; r <= size - (index_t)len; r++) {
-        index_t fb_r = f_base_fn(r);
-
-        for (index_t f = fb_r; r >= f + (index_t)min; f++) {
-            if (!gc_valid(r) || !gc_valid(f)) continue;
+        for (index_t f = f_first; f <= f_last; ++f) {
+            if (!right_valid(r) || !left_valid(f)) continue;
 
             risk_t min_risk = INF;
             key_t  min_key  = 0;
             key_t  k        = to_key_2(r, f);
 
-            if (f <= (index_t)(len * 2)) {
-                min_risk = min_key = 0;
+            if (f <= fumax) {
+                min_risk = 0;
             } else {
-                index_t r_min = std::max((index_t)max, f + (index_t)len);
-                index_t r_max = (f + r + (index_t)len) / 2 - (index_t)len;
-
-                for (index_t r_ = r_min; r_ <= r_max; r_++) {
-                    if (!gc_valid(r_)) continue;
-                    index_t fb_r_ = f_base_fn(r_);
-
-                    // exact fi_max for this r_
-                    index_t f_max_ = std::min(
-                        (r_ >= (index_t)min ? r_ - (index_t)min : (index_t)0),
-                        (2*f >= (index_t)(len + r_) ?
-                         2*f - (index_t)len - r_ : (index_t)0)
-                    );
-
-                    if (f_max_ < fb_r_) continue;
-                    index_t fi_max_ = std::min(f_max_ - fb_r_, band - 1);
-
-                    // O(1) prefix min lookup for row r_
-                    if (rp(r_, fi_max_) < min_risk) {
-                        min_risk = rp(r_,  fi_max_);
-                        min_key  = rpk(r_, fi_max_);
+                const index_t pred_r_min = std::max(max, f + len);
+                const index_t half_sum = (f + r + len) / 2;
+                if (half_sum >= len && 2 * f >= len) {
+                    const index_t pred_r_max = half_sum - len;
+                    const index_t midpoint_sum_max = 2 * f - len;
+                    const auto best = midpoint_rmq_->query(
+                        pred_r_min, pred_r_max, midpoint_sum_max);
+                    if (best.valid) {
+                        min_risk = best.value;
+                        min_key = best.key;
                     }
                 }
             }
 
+            if (min_risk >= INF) continue;
             min_risk += cost(f, u, alpha) + cost(r, u, alpha);
             memo[k]   = min_risk;
             prev[k]   = min_key;
 
-            // update row prefix for row r at fi
-            index_t fi = f - fb_r;
-            if (min_risk < rp(r, fi)) {
-                rp(r,  fi) = min_risk;
-                rpk(r, fi) = k;
-            }
+            midpoint_rmq_->insert(r, r + f, min_risk, k);
 
-            if (r >= (index_t)(size - (index_t)len * 3)) {
+            if (r >= terminal_r) {
                 if (min_risk < all_min_risk) {
                     all_min_risk = min_risk;
                     all_min_key  = k;
                 }
-            }
-        }
-
-        // build prefix min along fi for completed row r
-        index_t fb_r_ = f_base_fn(r);
-        for (index_t fi = 1; fi < band; fi++) {
-            if (rp(r, fi-1) < rp(r, fi)) {
-                rp(r,  fi) = rp(r,  fi-1);
-                rpk(r, fi) = rpk(r, fi-1);
             }
         }
     }
@@ -645,8 +701,62 @@ std::vector<index_t> RiskOptimizer::search(risk_t lower,
               << std::string(TW, '-') << "\n";
 
     max -= len; min -= len;
+    midpoint_rmq_.reset();
     std::vector<index_t> min_PDR, final_PDR, temp_PDR;
     risk_t alpha = ALPHA, l = lower, r = upper;
+
+    // A global count statistic does not guarantee that a complete alternating
+    // left/right PDR chain is feasible at that minimum. Test graph feasibility
+    // once before the numerical search. Adaptive minima may be relaxed, but an
+    // explicit user minimum remains a strict constraint.
+    auto find_feasible_chain = [&]() {
+        min_PDR.clear();
+        const risk_t probe_u = (lower + upper) / 2;
+        if (min == max)
+            top_k_opt_fast(probe_u, min_PDR, alpha);
+        else
+            top_k_opt_mi_fast(probe_u, min_PDR, alpha);
+        return !min_PDR.empty();
+    };
+
+    bool feasible = find_feasible_chain();
+    if (!feasible && args.pdr_min_candidates == 0) {
+        const index_t initial_left = left_min_candidates;
+        const index_t initial_right = right_min_candidates;
+        while (!feasible &&
+               (left_min_candidates > 1 || right_min_candidates > 1)) {
+            if (left_min_candidates > 1) --left_min_candidates;
+            if (right_min_candidates > 1) --right_min_candidates;
+            feasible = find_feasible_chain();
+        }
+        if (feasible) {
+            std::cout
+                << "Adaptive feasibility minimum relaxed for a complete PDR "
+                   "chain: left "
+                << initial_left << " -> " << left_min_candidates
+                << ", right " << initial_right << " -> "
+                << right_min_candidates << "\n\n";
+        }
+    }
+
+    if (!feasible) {
+        max += len;
+        min += len;
+        std::string message =
+            "no complete PDR chain satisfies the Primer3 candidate "
+            "constraints (left >= " + std::to_string(left_min_candidates) +
+            ", right >= " + std::to_string(right_min_candidates) + ")";
+        if (args.pdr_min_candidates > 0) {
+            message +=
+                "; reduce --pdr-min-candidates or use 0 for adaptive mode";
+        } else {
+            message +=
+                "; no complete chain exists even with one candidate per side";
+        }
+        throw std::runtime_error(message);
+    }
+
+    min_PDR.clear();
 
     for (index_t i = 1; r - l > eps; i++) {
         risk_t u = (l + r) / 2, temp;

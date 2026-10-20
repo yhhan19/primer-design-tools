@@ -315,11 +315,51 @@ double RiskOptimizer::calculate_secondary_structure_risk(const std::vector<char>
             std::accumulate(structure_risks.begin(), structure_risks.end(), 0.0) / structure_risks.size();
 }
 
- 
 std::vector<risk_t> RiskOptimizer::compute_risk(const std::vector<std::string>& sequences) {
     if (sequences.empty()) return {};
-    
+
     size_t length = sequences[0].size();
+
+    // Read precomputed rates directly when a rate file is provided.
+    if (!args.rate_file.empty()) {
+
+        std::cout << "Read scores for " << length << " positions..." << std::endl;
+        
+        std::ifstream input(args.rate_file);
+        if (!input) {
+            throw std::runtime_error(
+                "Could not open rate file: " + args.rate_file
+            );
+        }
+
+        std::vector<risk_t> risk_scores;
+        risk_scores.reserve(length);
+
+        risk_t rate;
+        while (input >> rate) {
+            risk_scores.push_back(rate);
+        }
+
+        if (!input.eof()) {
+            throw std::runtime_error(
+                "Invalid value found in rate file: " + args.rate_file
+            );
+        }
+
+        if (risk_scores.size() != length) {
+            throw std::runtime_error(
+                "Rate file contains " +
+                std::to_string(risk_scores.size()) +
+                " values, but sequence length is " +
+                std::to_string(length)
+            );
+        }
+
+        std::cout << "Score loaded!\n\n";
+
+        return risk_scores;
+    }
+    
     std::vector<risk_t> risk_scores(length, 0.0);
     
     // Configuration parameters

@@ -4,7 +4,8 @@
 
 class KPartiteGraph {
     public:
-        KPartiteGraph(const std::vector<PrimerOutput>& input);
+        KPartiteGraph(const std::vector<PrimerOutput>& input, double dimer_min_c, double dimer_max_c,
+                      const std::string& export_prefix = "");
         KPartiteGraph(index_t K, index_t N);
         KPartiteGraph(std::string filename);
         ~KPartiteGraph();
@@ -33,11 +34,31 @@ class KPartiteGraph {
                                                                 weight_t&   out_threshold) {
             return bottleneck_search_sa(restarts, max_iter, init_temp, cooling, out_threshold);
         }
+        // Maximize the (allowed_bad + 1)-th smallest selected cross-partition
+        // edge. Ties at the threshold are not counted as worse. Self-dimers
+        // are excluded, matching the existing bottleneck objective.
+        weight_t rank_bottleneck_score(const std::vector<index_t>& solution,
+                                       std::size_t allowed_bad) const;
+        std::vector<index_t> solve_rank_bottleneck_sa(
+            std::size_t restarts, std::size_t max_iter,
+            double init_temp, double cooling, std::size_t allowed_bad,
+            weight_t& out_threshold);
+        // Sum uses the same cross-partition edges and SA budget as rank search.
+        weight_t dimer_sum_score(const std::vector<index_t>& solution) const;
+        std::vector<index_t> solve_sum_sa(
+            std::size_t restarts, std::size_t max_iter, double init_temp,
+            double cooling, weight_t& out_score);
     private:
+        std::vector<index_t> solve_objective_sa(
+            std::size_t restarts, std::size_t max_iter, double init_temp,
+            double cooling, std::size_t allowed_bad, weight_t& out_score, bool sum);
+
         weight_t *vertices;
         weight_t **graph, **opt_graph, **opt_graph_2;
         index_t K, N;
         std::vector<index_t> valid_N;
+        std::vector<std::vector<std::pair<index_t, index_t>>> pair_choices;
+        void validate_pair_choices(const std::vector<index_t>& solution) const;
         weight_t dfs(index_t k, index_t *solution, std::size_t *count);
         void dfs2(index_t k, index_t *solution, weight_t precost, weight_t *max, std::size_t *count);
         weight_t bound(index_t k, index_t *solution);
@@ -55,7 +76,7 @@ class KPartiteGraph {
         // header
         std::vector<index_t> bottleneck_search_sa(std::size_t restarts, std::size_t max_iter,
                                                 double init_temp, double cooling,
-                                                weight_t& out_threshold);
+                                                weight_t& out_threshold, std::size_t allowed_bad = 0, bool sum = false);
 
 
 };

@@ -21,12 +21,16 @@
 #include <ctime>
 #include <cctype>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <numeric>
 #include <atomic>
 #include <set>
 #include <map>
 #include <future>
 #include <filesystem>
+#include <memory>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -59,9 +63,27 @@ struct Oligo {
     int length;
     double tm;
     double gc;
+
+    // Variant-aware features
+    double mismatch_rate          = 0.0;
+    double genome_mismatch_rate   = 0.0;
+    double mismatch_3prime_rate   = 0.0;
+    double weighted_mismatch      = 0.0;
+    double mean_binding_ddg       = std::numeric_limits<double>::quiet_NaN();
+    double coverage_rate          = 0.0;
+};
+
+struct PairMsaMetrics {
+    double joint_coverage = 0;
+    double joint_perfect_match = 0;
+    double joint_3prime_match = 0;
+    double weighted_mismatch = 1;
+    double unknown_fraction = 1;
+    std::size_t sequence_count = 0;
 };
 
 struct PrimerResult {
+    PairMsaMetrics msa;
     Oligo       left, right;
     std::size_t product_size = 0;
     index_t     pdr_left     = 0;
@@ -71,6 +93,7 @@ struct PrimerResult {
 };
 
 struct PrimerOutput {
+    bool pairs_required = false;  // When set, only combinations in pairs may be selected.
     std::vector<PrimerResult> pairs;
     std::vector<Oligo>        left_oligos;
     std::vector<Oligo>        right_oligos;
@@ -95,10 +118,13 @@ struct Args {
     std::string input_file;
     std::string output_file;
     std::string ref_file;
+    std::string rate_file;
 
     std::size_t len_amp     = 420;
     std::size_t len_amp_min = 252;
     std::size_t len_PDR     = 40;
+    std::size_t pdr_min_candidates = 0; // 0 = adaptive
+    std::string pdr_search = "midpoint";  // fixed or midpoint
     std::size_t len_ru      = 80;
     std::size_t len_fu      = 80;
     double      u_max       = 10000;
@@ -107,6 +133,9 @@ struct Args {
     std::size_t iter        = 1000;
     std::size_t seed        = 42;
 
+    std::string off_target_mode = "paired";
+    std::size_t off_target_amp_min = 1;
+    std::size_t off_target_amp_max = 1000;
     std::size_t kmer_len    = 8;
     std::size_t threshold   = 4;
     std::size_t nthreads    = 8;
@@ -122,6 +151,12 @@ struct Args {
     double      p3_min_gc   = 40.0;
     double      p3_max_gc   = 60.0;
     std::size_t num_return  = 5;
+    std::size_t p3_weighted_keep_percent = 20;
+    double pair_keep_percent = 20.0;
+    std::size_t pair_min_return = 5;
+    std::size_t pair_max_mismatches = 2;
+    std::size_t pair_max_3prime_mismatches = 0;
+    std::size_t pair_3prime_window = 5;
 
     double      mv          = 50.0;
     double      dv          = 1.5;
@@ -130,6 +165,12 @@ struct Args {
     
     double      dg_thres    = -15000;
     double      temp        = 37.0;
+    // Dimer window defaults to 58-62 C, independently of non-dimer temp.
+    std::string dimer_methods = "sum,min-max,top-k-bound";
+    std::string dimer_select;  // Empty prefers top-k-bound when listed, otherwise the first method.
+    double dimer_bad_percent = 1.0;  // Percentage of selected pool edges allowed below the rank threshold.
+    std::optional<double> dimer_temp_min = 58.0;
+    std::optional<double> dimer_temp_max = 62.0;
 
     bool        help        = false;
 };
@@ -247,6 +288,12 @@ Oligo extract_oligo(const primer_rec& p,
                     const char* sequence,
                     bool is_right);
 
+void score_primer_variants(
+    Oligo& oligo,
+    const std::vector<std::string>& sequences,
+    bool is_right
+);
+
 PrimerOutput extract_all(const p3retval* retval,
                          const seq_args*  sa);
 
@@ -254,12 +301,40 @@ void print_solution(const std::vector<PrimerResult>& solution);
 
 void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& solution, const std::string& filename);
 
+void save_coverage_report(const std::vector<SegmentContext>& segments,
+                          const std::vector<PrimerResult>& solution,
+                          const std::string& output_prefix);
+
+bool same_oligo(const Oligo& a, const Oligo& b);
+struct PairingStats {
+    std::size_t combinations = 0;
+    std::size_t checked = 0;
+    std::size_t accepted = 0;
+};
+PairingStats build_candidate_pairs(PrimerOutput& output, const std::string& target, const Args& args);
+void retain_surviving_pairs(PrimerOutput& output);
+void score_candidate_pairs_msa(PrimerOutput& output,
+    const std::vector<std::string>& sequences, const Args& args);
+std::size_t retain_candidate_pairs_msa(PrimerOutput& output, const Args& args);
+
 struct RemovalSets {
     std::set<int> remove_pair_F, remove_pair_R, remove_left, remove_right;
     std::size_t num_return;
     bool all_removed(const PrimerOutput& original) const {
         size_t kept_left  = original.left_oligos.size()  - remove_left.size();
         size_t kept_right = original.right_oligos.size() - remove_right.size();
+        if (original.pairs_required) {
+            bool any_pair = false;
+            for (const auto& pair : original.pairs) {
+                bool left = false, right = false;
+                for (std::size_t i = 0; i < original.left_oligos.size(); ++i)
+                    if (!remove_left.count(i) && same_oligo(pair.left, original.left_oligos[i])) left = true;
+                for (std::size_t i = 0; i < original.right_oligos.size(); ++i)
+                    if (!remove_right.count(i) && same_oligo(pair.right, original.right_oligos[i])) right = true;
+                any_pair = any_pair || (left && right);
+            }
+            if (!any_pair) return true;
+        }
         return kept_left < num_return || kept_right < num_return;
     }
 };
