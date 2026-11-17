@@ -1,4 +1,65 @@
 #include "pipeline.hpp"
+#include "run_log.hpp"
+
+namespace {
+void print_aligned_rows(std::ostream& out, const std::vector<std::vector<std::string>>& rows) {
+    if (rows.empty()) return;
+    std::vector<std::size_t> widths(rows.front().size(), 0);
+    for (const auto& row : rows)
+        for (std::size_t i = 0; i < row.size(); ++i) widths[i] = std::max(widths[i], row[i].size());
+    for (const auto& row : rows) {
+        for (std::size_t i = 0; i < row.size(); ++i)
+            out << (i ? "  " : "") << std::setw(int(widths[i])) << row[i];
+        out << '\n';
+    }
+}
+
+void save_combined_landscape(const std::string& path,
+    const std::array<std::vector<DimerLandscapePoint>, 2>& pools,
+    const std::array<std::size_t, 2>& counts, double lower, double upper) {
+    if (pools[0].empty() && pools[1].empty()) return;
+    std::ofstream svg(path);
+    if (!svg) throw std::runtime_error("Cannot write " + path);
+    svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1000\" height=\"540\" viewBox=\"0 0 1000 540\">"
+        << "<rect width=\"100%\" height=\"100%\" fill=\"white\"/><g font-family=\"Arial,sans-serif\" font-size=\"13\" fill=\"#222\">"
+        << "<text x=\"90\" y=\"28\" font-size=\"20\">Dimer landscape: affected primers in both pools</text>"
+        << "<text x=\"90\" y=\"51\">Each point is its cutoff's own-search result; dashed lines connect sampled cutoffs.</text>";
+    auto x = [&](double value) { return 90 + 850*(value-lower)/(upper-lower); };
+    auto y = [&](double percent) { return 425-3.3*percent; };
+    for (int i=0; i<=12; ++i) {
+        const double value=lower+(upper-lower)*i/12;
+        std::ostringstream label; label << std::setprecision(8) << value;
+        svg << "<line x1=\"" << x(value) << "\" x2=\"" << x(value) << "\" y1=\"95\" y2=\"425\" stroke=\"#e2e8f0\"/>"
+            << "<text x=\"" << x(value) << "\" y=\"450\" text-anchor=\"end\" transform=\"rotate(-35 " << x(value) << " 450)\">" << label.str() << "</text>";
+    }
+    for (int percent=0; percent<=100; percent+=10)
+        svg << "<line x1=\"90\" x2=\"940\" y1=\"" << y(percent) << "\" y2=\"" << y(percent) << "\" stroke=\"#e2e8f0\"/>"
+            << "<text x=\"78\" y=\"" << y(percent)+4 << "\" text-anchor=\"end\">" << percent << "%</text>";
+    svg << "<path d=\"M90 95V425H940\" fill=\"none\" stroke=\"#334155\"/>"
+        << "<text x=\"515\" y=\"510\" text-anchor=\"middle\">Dimer cutoff (cal/mol)</text>"
+        << "<text transform=\"translate(22 260) rotate(-90)\" text-anchor=\"middle\">Affected primers (%)</text>";
+    const std::array<std::string,2> colors{"#2563eb", "#16a34a"};
+    for (std::size_t pool=0; pool<2; ++pool) {
+        if (pools[pool].empty() || !counts[pool]) continue;
+        svg << "<line x1=\"" << 560+pool*185 << "\" x2=\"" << 595+pool*185 << "\" y1=\"75\" y2=\"75\" stroke=\"" << colors[pool]
+            << "\" stroke-width=\"2\" stroke-dasharray=\"7 5\"/><text x=\"" << 605+pool*185 << "\" y=\"79\">Pool " << pool+1 << " (" << counts[pool] << " primers)</text>";
+        svg << "<path class=\"pool" << pool+1 << "-curve\" d=\"";
+        for (std::size_t i=0; i<pools[pool].size(); ++i) {
+            const auto& point=pools[pool][i];
+            svg << (i ? " L" : "M") << x(point.cutoff) << " " << y(100.0*point.raw_affected_primers/counts[pool]);
+        }
+        svg << "\" fill=\"none\" stroke=\"" << colors[pool] << "\" stroke-width=\"2\" stroke-dasharray=\"7 5\"/>";
+        for (const auto& point : pools[pool])
+            svg << "<circle class=\"pool" << pool+1 << "-point\" cx=\"" << x(point.cutoff) << "\" cy=\"" << y(100.0*point.raw_affected_primers/counts[pool])
+                << "\" r=\"4\" fill=\"" << colors[pool] << "\"><title>Pool " << pool+1 << "; cutoff " << point.cutoff
+                << "; affected primers " << point.raw_affected_primers << "/" << counts[pool] << "</title></circle>";
+    }
+    svg << "</g></svg>\n";
+    svg.close();
+    if (!svg) throw std::runtime_error("Failed writing " + path);
+    std::cout << "Combined two-pool landscape written to: " << path << '\n';
+}
+}
 
 void PDRStage::run(PipelineContext& ctx) {
     srand(ctx.args.seed);
@@ -40,8 +101,14 @@ void PDRStage::run(PipelineContext& ctx) {
 }
 
 void PrimerSelStage::run(PipelineContext& ctx) {
-    std::cout << "Starting primer selection for "
-              << ctx.pdr_regions.size() / 2 << " PDRs\n";
+    if (!ctx.pdr_region_lengths.empty()) {
+        if (ctx.pdr_region_lengths.size() != ctx.pdr_regions.size())
+            throw std::invalid_argument("Explicit PDR lengths must match region starts");
+        for (std::size_t i = 0; i < ctx.pdr_regions.size(); ++i)
+            if (!ctx.pdr_region_lengths[i] || ctx.pdr_regions[i] > ctx.tmpl.size() ||
+                ctx.pdr_region_lengths[i] > ctx.tmpl.size() - ctx.pdr_regions[i])
+                throw std::invalid_argument("Explicit PDR window is outside the template");
+    }
 
     Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config",
                ctx.args.mv, ctx.args.dv, ctx.args.dntp,
@@ -90,10 +157,6 @@ void PrimerSelStage::run(PipelineContext& ctx) {
     pa->pick_right_primer   = 1;
     pa->pick_internal_oligo = 0;
 
-    std::cout << "Primer3 task: pick_primer_list"
-              << "  |  Template length: "
-              << ctx.tmpl.size()
-              << " bp\n";
 
 
     // ==============================================================
@@ -120,51 +183,10 @@ void PrimerSelStage::run(PipelineContext& ctx) {
 
 
     // ==============================================================
-    // 3. Ranking rule for variant robustness
-    //
-    // Lower is better.
-    //
-    // Priority:
-    //   1. weighted mismatch
-    //   2. 3'-end mismatch rate
-    //   3. genome mismatch rate
-    //   4. ordinary per-base mismatch rate
-    // ==============================================================
-    auto variant_better =
-        [](const Oligo& a, const Oligo& b) {
-
-            if (a.weighted_mismatch !=
-                b.weighted_mismatch) {
-
-                return a.weighted_mismatch <
-                       b.weighted_mismatch;
-            }
-
-            if (a.mismatch_3prime_rate !=
-                b.mismatch_3prime_rate) {
-
-                return a.mismatch_3prime_rate <
-                       b.mismatch_3prime_rate;
-            }
-
-            if (a.genome_mismatch_rate !=
-                b.genome_mismatch_rate) {
-
-                return a.genome_mismatch_rate <
-                       b.genome_mismatch_rate;
-            }
-
-            return a.mismatch_rate <
-                   b.mismatch_rate;
-        };
-
-    // ==============================================================
     // 6. Run Primer3 for each PDR pair
     // ==============================================================
     struct KeptPrimerSummary {
         int pdr_index;
-        index_t left_start;
-        index_t right_start;
         std::size_t left_raw;
         std::size_t right_raw;
         std::size_t left_paired = 0;
@@ -189,13 +211,13 @@ void PrimerSelStage::run(PipelineContext& ctx) {
         // _adjust_seq_args() may optimize these intervals in place, so
         // restore the requested PDR lengths before every Primer3 call.
         sa->ok_regions.left_pairs[0][1] =
-            ctx.args.len_PDR;
+            ctx.pdr_region_lengths.empty() ? ctx.args.len_PDR : ctx.pdr_region_lengths.at(i);
 
         sa->ok_regions.right_pairs[0][0] =
             ctx.pdr_regions[i + 1];
 
         sa->ok_regions.right_pairs[0][1] =
-            ctx.args.len_PDR;
+            ctx.pdr_region_lengths.empty() ? ctx.args.len_PDR : ctx.pdr_region_lengths.at(i + 1);
 
 
         // ----------------------------------------------------------
@@ -268,47 +290,7 @@ void PrimerSelStage::run(PipelineContext& ctx) {
             out.right_oligos.size();
 
 
-        // ==========================================================
-        // 8. Variant-aware scoring
-        // ==========================================================
-
-        // Left candidates
-        for (Oligo& o : out.left_oligos) {
-
-            score_primer_variants(
-                o,
-                ctx.sequences,
-                false
-            );
-        }
-
-
-        // Right candidates
-        for (Oligo& o : out.right_oligos) {
-
-            score_primer_variants(
-                o,
-                ctx.sequences,
-                true
-            );
-        }
-
-
-        // ==========================================================
-        // 9. Rank candidates for reporting; retain all before pairing
-        // ==========================================================
-        std::stable_sort(
-            out.left_oligos.begin(),
-            out.left_oligos.end(),
-            variant_better
-        );
-
-        std::stable_sort(
-            out.right_oligos.begin(),
-            out.right_oligos.end(),
-            variant_better
-        );
-
+        // Keep all individual candidates; rank and retain validated pairs below.
         if (out.left_oligos.empty() || out.right_oligos.empty()) {
             destroy_p3retval(retval);
             destroy_seq_args(sa);
@@ -331,8 +313,6 @@ void PrimerSelStage::run(PipelineContext& ctx) {
 
         kept_summary.push_back({
             region_idx,
-            ctx.pdr_regions[i],
-            ctx.pdr_regions[i + 1],
             left_before,
             right_before
         });
@@ -395,48 +375,25 @@ void PrimerSelStage::run(PipelineContext& ctx) {
     // ==============================================================
     // 13. Final retained-primer summary
     // ==============================================================
-    constexpr int SUMMARY_WIDTH = 134;
     std::size_t total_left_raw = 0, total_right_raw = 0;
     std::size_t total_left_paired = 0, total_right_paired = 0;
-    std::size_t total_combinations = 0, total_checked = 0;
-    std::size_t total_p3_rejected = 0, total_pairs = 0, total_msa_kept = 0;
-    std::cout << "\nCANDIDATE PAIR SUMMARY (after Primer3 checks and MSA filtering)\n"
-              << "In pairs/raw = distinct primers present in retained MSA-ranked pairs / original candidates.\n"
-              << std::string(SUMMARY_WIDTH, '-') << '\n' << std::right
-              << std::setw(8) << "PDR" << std::setw(12) << "Left PDR"
-              << std::setw(12) << "Right PDR" << std::setw(20) << "Left in pairs/raw"
-              << std::setw(20) << "Right in pairs/raw" << std::setw(12) << "Combinations"
-              << std::setw(14) << "P3 checked" << std::setw(12) << "P3 rejected"
-              << std::setw(12) << "P3 valid" << std::setw(12) << "MSA kept" << '\n'
-              << std::string(SUMMARY_WIDTH, '-') << '\n';
+    std::size_t total_pairs = 0, total_msa_kept = 0;
+    std::vector<std::vector<std::string>> rows{{"PDR", "Left kept/raw", "Right kept/raw", "Pairs before MSA", "Pairs kept"}};
     for (const auto& row : kept_summary) {
-        const auto p3_rejected = row.pairing.checked - row.pairing.accepted;
         total_left_raw += row.left_raw; total_right_raw += row.right_raw;
         total_left_paired += row.left_paired; total_right_paired += row.right_paired;
-        total_combinations += row.pairing.combinations;
-        total_checked += row.pairing.checked;
-        total_p3_rejected += p3_rejected; total_pairs += row.pairing.accepted;
+        total_pairs += row.pairing.accepted;
         total_msa_kept += row.msa_kept;
-        std::cout << std::setw(8) << row.pdr_index << std::setw(12) << row.left_start
-                  << std::setw(12) << row.right_start
-                  << std::setw(20) << (std::to_string(row.left_paired) + "/" + std::to_string(row.left_raw))
-                  << std::setw(20) << (std::to_string(row.right_paired) + "/" + std::to_string(row.right_raw))
-                  << std::setw(12) << row.pairing.combinations
-                  << std::setw(14) << row.pairing.checked << std::setw(12) << p3_rejected
-                  << std::setw(12) << row.pairing.accepted << std::setw(12) << row.msa_kept << '\n';
+        rows.push_back({std::to_string(row.pdr_index),
+            std::to_string(row.left_paired)+"/"+std::to_string(row.left_raw),
+            std::to_string(row.right_paired)+"/"+std::to_string(row.right_raw),
+            std::to_string(row.pairing.accepted), std::to_string(row.msa_kept)});
     }
-    std::cout << std::string(SUMMARY_WIDTH, '-') << '\n'
-              << std::setw(32) << "TOTAL"
-              << std::setw(20) << (std::to_string(total_left_paired) + "/" + std::to_string(total_left_raw))
-              << std::setw(20) << (std::to_string(total_right_paired) + "/" + std::to_string(total_right_raw))
-              << std::setw(12) << total_combinations
-              << std::setw(14) << total_checked << std::setw(12) << total_p3_rejected
-              << std::setw(12) << total_pairs << std::setw(12) << total_msa_kept << '\n'
-              << std::string(SUMMARY_WIDTH, '-') << '\n'
-              << "P3 checked: combinations submitted to Primer3; no geometry/product-length prefilter.\n"
-              << "P3 rejected: Primer3 returned no acceptable pair.\n"
-              << "MSA kept: ranked pairs retained after percentage/minimum filtering, including boundary ties.\n"
-              << "Primers without a retained pair are excluded from downstream candidate lists.\n";
+    rows.push_back({"TOTAL", std::to_string(total_left_paired)+"/"+std::to_string(total_left_raw),
+        std::to_string(total_right_paired)+"/"+std::to_string(total_right_raw),
+        std::to_string(total_pairs), std::to_string(total_msa_kept)});
+    std::cout << "\nCandidate pairs after MSA filtering\n" << std::right;
+    print_aligned_rows(std::cout, rows);
 
     // ==============================================================
     // 14. Cleanup
@@ -477,7 +434,7 @@ void OffTargetStage::run(PipelineContext& ctx) {
     Automaton ac(labels, sequences, ctx.args.kmer_len);
     std::vector<PrimerOutput> all_filtered;
     if (ctx.args.off_target_mode == "single") {
-        auto results = ac.search(ctx.args.ref_file, ctx.args.kmer_len - 1,
+        auto results = ac.search(ctx.args.ref_file, 0,
             ctx.args.threshold, ctx.args.dg_thres, ctx.args.chunk_size,
             ctx.args.block_size, ctx.args.nthreads);
         write_results(ctx.args.output_file + "." + short_name(), results, labels);
@@ -570,6 +527,8 @@ void OffTargetStage::run(PipelineContext& ctx) {
 
 
 void DimerStage::run(PipelineContext& ctx) {
+    if (ctx.args.dimer_rounds != 1)
+        throw std::runtime_error("Dimer refinement rounds are disabled; use 1");
     srand(ctx.args.seed);
 
     Thal::init(std::string(PRIMER3_PATH) + "/src/primer3_config", 
@@ -578,6 +537,12 @@ void DimerStage::run(PipelineContext& ctx) {
         ctx.args.dntp, 
         ctx.args.dna_conc, 
         ctx.args.temp);
+
+    const auto cache_directory = ctx.args.dimer_cache == "auto"
+        ? (fs::path(ctx.args.output_file).parent_path() / ".dpro-dimer-cache").string()
+        : ctx.args.dimer_cache;
+    Thal::configure_dimer_cache(cache_directory);
+    std::cout << "Dimer interaction cache: " << cache_directory << '\n';
 
     using Clock = std::chrono::steady_clock;
     using Ms    = std::chrono::milliseconds;
@@ -603,10 +568,12 @@ void DimerStage::run(PipelineContext& ctx) {
     }
 
 
+    std::array<std::vector<DimerLandscapePoint>, 2> pool_landscapes;
     auto solve_pool = [&](const std::vector<PrimerOutput>& primers,
                       int pool_num) -> std::vector<index_t>
     {
         if (primers.empty()) return {};
+        RunLogBlock pool_block("Pool " + std::to_string(pool_num));
         KPartiteGraph g(primers, ctx.args.dimer_temp_min.value_or(ctx.args.temp),
             ctx.args.dimer_temp_max.value_or(ctx.args.temp),
             ctx.args.output_file + ".pool" + std::to_string(pool_num) + ".kpartite");
@@ -614,10 +581,15 @@ void DimerStage::run(PipelineContext& ctx) {
         const std::size_t selected_edges = std::size_t(g.get_K()) * (g.get_K() - 1) / 2;
         const std::size_t allowed_bad = static_cast<std::size_t>(std::floor(
             static_cast<long double>(selected_edges) * ctx.args.dimer_bad_percent / 100.0L));
-        std::cout << "Pool " << pool_num << " rank objective: allowed_bad=" << allowed_bad
+        auto cutoff = ctx.args.dimer_dg_cutoff;
+        if (!cutoff && (ctx.args.dimer_methods == "min-below-cutoff" ||
+                        ctx.args.dimer_methods == "min-affected-amplicons" ||
+                        ctx.args.dimer_methods == "min-affected-primers"))
+            cutoff = Args::default_dimer_dg_cutoff;
+        if (!cutoff) std::cout << "Pool " << pool_num << " rank objective: allowed_bad=" << allowed_bad
                   << " / " << selected_edges << " (" << ctx.args.dimer_bad_percent
                   << "%), maximizing rank " << allowed_bad + 1 << " dG\n";
-        const double init_temp = 1000.0;
+        const double init_temp = cutoff ? 1.0 : 1000.0;
         const std::size_t sa_iter = ctx.args.iter * 5;
         const double cooling = std::exp(std::log(1e-6 / init_temp) / double(sa_iter));
         struct Comparison {
@@ -625,46 +597,206 @@ void DimerStage::run(PipelineContext& ctx) {
             std::vector<index_t> solution;
             double sum, worst, bound;
             long ms;
+            DimerCutoffMetrics metrics;
         };
         std::vector<Comparison> results;
+        std::vector<double> landscape_cutoffs;
+        for (std::size_t i = 0; i < ctx.args.dimer_landscape_points; ++i)
+            landscape_cutoffs.push_back(ctx.args.dimer_landscape_min +
+                (ctx.args.dimer_landscape_max - ctx.args.dimer_landscape_min) *
+                i / (ctx.args.dimer_landscape_points - 1));
+        const auto pool_prefix = ctx.args.output_file + ".pool" + std::to_string(pool_num);
+        std::ofstream refinement;
+        if (ctx.args.dimer_rounds > 1) {
+            refinement.open(pool_prefix + ".refinement.tsv");
+            if (!refinement) throw std::runtime_error("Cannot write refinement report");
+            refinement << "method\tround\tseed\tobjective\taffected_primers\taffected_amplicons"
+                       << "\tseverity_cal_per_mol\tcutoff_cal_per_mol\n";
+        }
         std::istringstream methods(ctx.args.dimer_methods);
         std::string method;
         std::string selected_method = ctx.args.dimer_select;
         if (selected_method.empty()) {
-            std::istringstream candidates(ctx.args.dimer_methods);
-            std::string candidate;
             selected_method = ctx.args.dimer_methods.substr(0, ctx.args.dimer_methods.find(','));
-            while (std::getline(candidates, candidate, ','))
-                if (candidate == "top-k-bound") selected_method = candidate;
         }
-        while (std::getline(methods, method, ',')) {
-            // Reset per method so method ordering does not change search results.
-            srand(ctx.args.seed);
+        while (!ctx.args.landscape_only && std::getline(methods, method, ',')) {
+            RunLogBlock main_search("Pool " + std::to_string(pool_num) + " / " + method);
+            std::vector<std::vector<index_t>> seeds;
+            if (!ctx.args.dimer_start_prefix.empty()) {
+                const auto path = ctx.args.dimer_start_prefix + ".pool" +
+                    std::to_string(pool_num) + "." + method + ".primers.tsv";
+                std::ifstream input(path);
+                if (!input) throw std::runtime_error("Cannot read seed panel " + path);
+                std::string line;
+                std::getline(input, line);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line != "pool\ttarget_index\tside\tcandidate_index\tsequence\tstart\tlength")
+                    throw std::runtime_error("Seed panel requires current candidate export format: " + path);
+                std::vector<index_t> seed(g.get_K());
+                for (std::size_t p = 0; p < seed.size(); ++p) {
+                    if (!std::getline(input, line)) throw std::runtime_error("Incomplete seed panel " + path);
+                    std::istringstream row(line);
+                    std::size_t pool, target, candidate, start, length;
+                    std::string side, seq, extra;
+                    if (!(row >> pool >> target >> side >> candidate >> seq >> start >> length) ||
+                        (row >> extra) || pool != pool_num || target != p / 2 ||
+                        side != (p % 2 ? "right" : "left"))
+                        throw std::runtime_error("Invalid seed panel row: " + path);
+                    const auto& oligos = p % 2 ? primers[p/2].right_oligos : primers[p/2].left_oligos;
+                    if (candidate >= oligos.size() || oligos[candidate].seq != seq ||
+                        oligos[candidate].start != start || oligos[candidate].length != length)
+                        throw std::runtime_error("Seed panel candidates do not match: " + path);
+                    seed[p] = candidate;
+                }
+                if (std::getline(input, line)) throw std::runtime_error("Extra seed panel rows: " + path);
+                seeds.push_back(seed);
+            }
             weight_t objective;
             const auto begin = Clock::now();
-            auto solution = method == "sum"
-                ? g.solve_sum_sa(4000, sa_iter, init_temp, cooling, objective)
-                : g.solve_rank_bottleneck_sa(4000, sa_iter, init_temp, cooling,
-                    method == "min-max" ? 0 : allowed_bad, objective);
+            std::vector<index_t> solution;
+            for (std::size_t round = 0; round < ctx.args.dimer_rounds; ++round) {
+                // Preserve method-independent random starts when refinement is disabled.
+                const unsigned seed = static_cast<unsigned>(ctx.args.seed) + static_cast<unsigned>(round);
+                srand(seed);
+                g.set_search_seeds(seeds);
+                solution = method == "min-affected-primers"
+                    ? g.solve_affected_primers_sa(ctx.args.dimer_restarts, sa_iter, init_temp, cooling,
+                        *cutoff, objective)
+                    : method == "min-affected-amplicons"
+                    ? g.solve_affected_amplicons_sa(ctx.args.dimer_restarts, sa_iter, init_temp, cooling,
+                        *cutoff, objective)
+                    : cutoff
+                    ? g.solve_cutoff_sa(ctx.args.dimer_restarts, sa_iter, init_temp, cooling, *cutoff, objective)
+                    : method == "sum"
+                    ? g.solve_sum_sa(ctx.args.dimer_restarts, sa_iter, init_temp, cooling, objective)
+                    : g.solve_rank_bottleneck_sa(ctx.args.dimer_restarts, sa_iter, init_temp, cooling,
+                        method == "min-max" ? 0 : allowed_bad, objective);
+                if (refinement.is_open()) {
+                    const auto risk_cutoff = cutoff.value_or(Args::default_dimer_dg_cutoff);
+                    const auto m = g.dimer_cutoff_metrics(solution, risk_cutoff);
+                    refinement << std::setprecision(17) << method << '\t' << round + 1 << '\t'
+                        << seed << '\t' << objective << '\t' << m.affected_primers << '\t'
+                        << m.affected_amplicons << '\t' << m.severity << '\t' << risk_cutoff << '\n';
+                }
+                seeds = {solution};
+                for (const auto& point : g.landscape())
+                    if (!point.solution.empty() &&
+                        std::find(seeds.begin(), seeds.end(), point.solution) == seeds.end())
+                        seeds.push_back(point.solution);
+            }
             const auto ms = std::chrono::duration_cast<Ms>(Clock::now() - begin).count();
+            if (cutoff)
+                std::cout << "Pool " << pool_num << ": "
+                          << g.count_below_cutoff(solution, *cutoff) << " / " << selected_edges
+                          << " interactions below " << *cutoff << " cal/mol\n";
             results.push_back({method, solution, g.dimer_sum_score(solution),
                 g.rank_bottleneck_score(solution, 0),
-                g.rank_bottleneck_score(solution, allowed_bad), ms});
+                g.rank_bottleneck_score(solution, allowed_bad), ms,
+                g.dimer_cutoff_metrics(solution, cutoff.value_or(Args::default_dimer_dg_cutoff))});
             // Persist each alternative, rather than discarding non-selected panels.
             const std::string path = ctx.args.output_file + ".pool" +
                 std::to_string(pool_num) + "." + method + ".primers.tsv";
             std::ofstream file(path);
             if (!file) throw std::runtime_error("Cannot write " + path);
-            file << "pool\ttarget_index\tside\tcandidate_index\tsequence\n";
+            file << "pool\ttarget_index\tside\tcandidate_index\tsequence\tstart\tlength\n";
             for (std::size_t i = 0; i < primers.size(); ++i) {
                 const auto left = solution[2*i], right = solution[2*i+1];
                 file << pool_num << '\t' << i << "\tleft\t" << left << '\t'
-                     << primers[i].left_oligos[left].seq << '\n';
+                     << primers[i].left_oligos[left].seq << '\t'
+                     << primers[i].left_oligos[left].start << '\t'
+                     << primers[i].left_oligos[left].length << '\n';
                 file << pool_num << '\t' << i << "\tright\t" << right << '\t'
-                     << primers[i].right_oligos[right].seq << '\n';
+                     << primers[i].right_oligos[right].seq << '\t'
+                     << primers[i].right_oligos[right].start << '\t'
+                     << primers[i].right_oligos[right].length << '\n';
             }
             file.close();
             if (!file) throw std::runtime_error("Failed writing " + path);
+            main_search.complete(std::to_string(results.back().metrics.affected_primers) + "/" +
+                std::to_string(g.get_K()) + " affected primers");
+        }
+        if (refinement.is_open()) {
+            refinement.close();
+            if (!refinement) throw std::runtime_error("Failed writing refinement report");
+        }
+        if (!landscape_cutoffs.empty()) {
+            RunLogBlock landscape_block("Pool " + std::to_string(pool_num) + " landscape");
+            std::cout << "\nPool " << pool_num << " landscape: " << ctx.args.dimer_landscape_points
+                      << " cutoff searches; " << (ctx.args.dimer_landscape_adaptive ? "adaptive sampling" : "uniform sampling")
+                      << "; minimize affected primers at each cutoff\n"
+                      << "Adaptive priority uses best-known endpoint counts across panels found so far.\n";
+            std::vector<std::vector<index_t>> seeds;
+            for (const auto& result : results) seeds.push_back(result.solution);
+            g.set_search_seeds(seeds);
+            g.optimize_landscape(ctx.args.dimer_landscape_points,
+                ctx.args.dimer_landscape_min, ctx.args.dimer_landscape_max,
+                ctx.args.dimer_landscape_adaptive, ctx.args.dimer_landscape_restarts,
+                ctx.args.dimer_landscape_iterations, static_cast<unsigned>(ctx.args.seed),
+                cutoff.value_or(Args::default_dimer_dg_cutoff));
+            landscape_block.complete(std::to_string(g.landscape().size()) + " cutoffs searched");
+        }
+        if (!g.landscape().empty()) {
+            pool_landscapes[pool_num-1] = g.landscape();
+            std::vector<std::vector<std::string>> landscape_rows{{"Cutoff(cal/mol)", "Affected primers", "Affected(%)", "Time(ms)"}};
+            for (const auto& point : g.landscape()) {
+                std::ostringstream cutoff_text, percent_text;
+                cutoff_text << std::setprecision(10) << point.cutoff;
+                percent_text << std::fixed << std::setprecision(1) << 100.0 * point.raw_affected_primers / g.get_K();
+                landscape_rows.push_back({cutoff_text.str(), std::to_string(point.raw_affected_primers)+"/"+std::to_string(g.get_K()),
+                    percent_text.str(), std::to_string(point.time_ms)});
+            }
+            std::cout << "\nPool " << pool_num << " landscape results (cutoff order; each cutoff's own-search result)\n";
+            print_aligned_rows(std::cout, landscape_rows);
+            std::ofstream table(pool_prefix + ".landscape.tsv");
+            std::ofstream witnesses, svg;
+            if (!ctx.args.landscape_only) {
+                witnesses.open(pool_prefix + ".landscape.primers.tsv");
+                svg.open(pool_prefix + ".landscape.svg");
+            }
+            if (!table || (!ctx.args.landscape_only && (!witnesses || !svg))) throw std::runtime_error("Cannot write landscape reports");
+            table << "cutoff_cal_per_mol\taffected_primers\tprimers\taffected_primer_percent"
+                  << "\taffected_amplicons\tamplicons\tseverity_cal_per_mol\tbad_pairs"
+                  << "\traw_affected_primers\tseed\trestarts\titerations\ttime_ms\n";
+            if (witnesses.is_open()) witnesses << "cutoff_cal_per_mol\tpartition\tcandidate_index\n";
+            if (svg.is_open()) svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"430\" viewBox=\"0 0 800 430\">"
+                << "<rect width=\"800\" height=\"430\" fill=\"white\"/>"
+                << "<g font-family=\"sans-serif\" font-size=\"13\" fill=\"#222\">"
+                << "<text x=\"60\" y=\"25\">Pool " << pool_num
+                << ": independently optimized affected-primer cutoffs</text>"
+                << "<text x=\"60\" y=\"47\">Own-search affected-primer counts; one heuristic search per cutoff; no optimality guarantee</text>"
+                << "<path d=\"M60 75V345H750\" fill=\"none\" stroke=\"#333\"/>"
+                << "<text x=\"270\" y=\"400\">Dimer cutoff (cal/mol)</text>"
+                << "<text x=\"60\" y=\"370\">" << ctx.args.dimer_landscape_min << "</text>"
+                << "<text x=\"700\" y=\"370\">" << ctx.args.dimer_landscape_max << "</text>"
+                << "<text x=\"15\" y=\"85\">100%</text><text x=\"25\" y=\"345\">0%</text>";
+            for (const auto& point : g.landscape()) {
+                const auto& m = point.metrics;
+                const double percent = 100.0 * m.affected_primers / g.get_K();
+                const double own_percent = 100.0 * point.raw_affected_primers / g.get_K();
+                table << std::setprecision(17) << point.cutoff << '\t' << m.affected_primers
+                      << '\t' << g.get_K() << '\t' << percent << '\t' << m.affected_amplicons
+                      << '\t' << primers.size() << '\t' << m.severity << '\t' << m.below_cutoff
+                      << '\t' << point.raw_affected_primers << '\t' << point.seed
+                      << '\t' << ctx.args.dimer_landscape_restarts
+                      << '\t' << ctx.args.dimer_landscape_iterations << '\t' << point.time_ms << '\n';
+                if (witnesses.is_open()) for (std::size_t p = 0; p < point.solution.size(); ++p)
+                    witnesses << std::setprecision(17) << point.cutoff << '\t' << p << '\t' << point.solution[p] << '\n';
+                const double x = 60 + 690 * (point.cutoff - ctx.args.dimer_landscape_min) /
+                    (ctx.args.dimer_landscape_max - ctx.args.dimer_landscape_min);
+                if (svg.is_open()) svg << "<circle cx=\"" << x << "\" cy=\"" << 345 - 2.7 * own_percent
+                    << "\" r=\"5\" fill=\"#1676b8\"><title>Cutoff " << point.cutoff
+                    << "; affected primers " << point.raw_affected_primers << "/" << g.get_K()
+                << "</title></circle>";
+            }
+            if (svg.is_open()) svg << "</g></svg>\n";
+            table.close();
+            if (witnesses.is_open()) witnesses.close();
+            if (svg.is_open()) svg.close();
+            if (!table || (!ctx.args.landscape_only && (!witnesses || !svg))) throw std::runtime_error("Failed writing landscape reports");
+        }
+        if (ctx.args.landscape_only) {
+            pool_block.complete(std::to_string(g.landscape().size()) + " cutoffs; " + std::to_string(g.get_K()) + " primers");
+            return {};
         }
         const std::string report_path = ctx.args.output_file + ".pool" +
             std::to_string(pool_num) + ".dimer-methods.tsv";
@@ -672,12 +804,25 @@ void DimerStage::run(PipelineContext& ctx) {
         if (!report) throw std::runtime_error("Cannot write " + report_path);
         auto print_table = [&](std::ostream& out) {
             out << "method\tsum_dg_cal_per_mol\tworst_dg_cal_per_mol"
-                << "\ttop_k_bound_cal_per_mol\tallowed_bad\tedges\ttime_ms\tselected\n";
+                << "\ttop_k_bound_cal_per_mol\tallowed_bad\tedges\ttime_ms\tselected";
+            if (cutoff) out << "\tdg_cutoff_cal_per_mol\tbelow_cutoff";
+            out << "\taffected_amplicons\tamplicons\taffected_amplicon_percent"
+                << "\tseverity_cal_per_mol\trisk_cutoff_cal_per_mol"
+                << "\taffected_primers\tprimers\taffected_primer_percent\n";
             out << std::setprecision(std::numeric_limits<double>::max_digits10);
-            for (const auto& r : results)
+            for (const auto& r : results) {
                 out << r.method << '\t' << r.sum << '\t' << r.worst << '\t'
                     << r.bound << '\t' << allowed_bad << '\t' << selected_edges
-                    << '\t' << r.ms << '\t' << (r.method == selected_method) << '\n';
+                    << '\t' << r.ms << '\t' << (r.method == selected_method);
+                if (cutoff)
+                    out << '\t' << *cutoff << '\t' << g.count_below_cutoff(r.solution, *cutoff);
+                out << '\t' << r.metrics.affected_amplicons << '\t' << primers.size()
+                    << '\t' << 100.0 * r.metrics.affected_amplicons / primers.size()
+                    << '\t' << r.metrics.severity
+                    << '\t' << cutoff.value_or(Args::default_dimer_dg_cutoff)
+                    << '\t' << r.metrics.affected_primers << '\t' << g.get_K()
+                    << '\t' << 100.0 * r.metrics.affected_primers / g.get_K() << '\n';
+            }
         };
         print_table(report);
         report.close();
@@ -690,12 +835,16 @@ void DimerStage::run(PipelineContext& ctx) {
             return text.str();
         };
         std::vector<std::vector<std::string>> rows = {
-            {"Method", "Sum dG", "Worst dG", "Top-k bound", "Allowed bad", "Edges", "Time(ms)", "Selected"}
+            {"Method", "Sum dG", "Worst dG", "Top-k bound", "Allowed bad", "Edges",
+             "Affected primers", "Affected amps", "Severity", "Time(ms)", "Selected"}
         };
         for (const auto& r : results)
             rows.push_back({r.method, format_score(r.sum), format_score(r.worst),
                 format_score(r.bound), std::to_string(allowed_bad),
-                std::to_string(selected_edges), std::to_string(r.ms),
+                std::to_string(selected_edges),
+                std::to_string(r.metrics.affected_primers) + "/" + std::to_string(g.get_K()),
+                std::to_string(r.metrics.affected_amplicons) + "/" + std::to_string(primers.size()),
+                format_score(r.metrics.severity), std::to_string(r.ms),
                 r.method == selected_method ? "yes" : ""});
         std::vector<std::size_t> widths(rows.front().size(), 0);
         for (const auto& row : rows)
@@ -719,6 +868,7 @@ void DimerStage::run(PipelineContext& ctx) {
         for (const auto& r : results)
             if (r.method == selected_method) {
                 std::cout << " Selected: " << r.method << '\n';
+                pool_block.complete(std::to_string(r.metrics.affected_primers) + "/" + std::to_string(g.get_K()) + " affected primers");
                 return r.solution;
             }
         throw std::runtime_error("No selected dimer method result");
@@ -726,6 +876,10 @@ void DimerStage::run(PipelineContext& ctx) {
 
     auto sol1 = solve_pool(pool1_primers, 1);
     auto sol2 = solve_pool(pool2_primers, 2);
+    save_combined_landscape(ctx.args.output_file + ".landscape.svg", pool_landscapes,
+        {2*pool1_primers.size(), 2*pool2_primers.size()},
+        ctx.args.dimer_landscape_min, ctx.args.dimer_landscape_max);
+    if (ctx.args.landscape_only) return;
 
     // Reconstruct PrimerResult for pool 1
     for (std::size_t amp = 0; amp < pool1_primers.size(); amp++) {
@@ -836,8 +990,9 @@ void Pipeline::run(PipelineContext& ctx) {
             std::to_string(stages_.size());
 
         const std::string short_name = stages_[i]->short_name();
+        RunLogBlock stage_block("[" + stage_number + "] " + stages_[i]->name());
 
-        if (short_name == "dim") {
+        if (short_name == "dim" || short_name == "expand") {
             // Flatten all filtered primers from all segments.
             ctx.filtered_primers.clear();
 
@@ -916,6 +1071,7 @@ void Pipeline::run(PipelineContext& ctx) {
 
                 const std::string segment_tag =
                     segment_name + segment_counter;
+                RunLogBlock target_block(segment_tag);
 
                 const std::string running =
                     running_prefix + segment_tag + " ]";
@@ -935,7 +1091,23 @@ void Pipeline::run(PipelineContext& ctx) {
 
                 print_banner(completed);
                 std::cout << '\n';
+                std::size_t pairs = 0;
+                if (short_name == "pdr") pairs = ctx.pdr_regions.size()/2;
+                else for (const auto& candidates : ctx.candidate_primers) pairs += candidates.pairs.size();
+                target_block.complete(std::to_string(pairs) + (short_name == "pdr" ? " PDR pairs" : " candidate pairs"));
             }
         }
+        std::string summary = std::to_string(ctx.segments.size()) + " target(s)";
+        if (short_name == "offt" && ctx.args.ref_file.empty()) summary = "skipped (no reference)";
+        if (short_name == "dim") summary = ctx.args.landscape_only
+            ? std::to_string(ctx.args.dimer_landscape_points) + " cutoff searches per pool"
+            : std::to_string(ctx.solution_primers.size()) + " amplicons selected";
+        if (short_name == "expand") {
+            std::ifstream audit(ctx.args.output_file + ".expansion.tsv");
+            std::string line;
+            while (std::getline(audit, line))
+                if (line.find("# status\t") == 0) summary = line.substr(9);
+        }
+        stage_block.complete(summary);
     }
 }

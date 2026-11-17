@@ -16,18 +16,37 @@ AutomatonNode::~AutomatonNode() {
 
 Automaton::Automaton(const std::vector<std::string> &labels, 
                      const std::vector<std::string> &seqs, 
-                     std::size_t kmer_len) : k(kmer_len) {
+                     std::size_t kmer_len)
+    : labels(labels), sequences(seqs), k(kmer_len) {
+    if (labels.size() != seqs.size() || k == 0 ||
+        std::any_of(seqs.begin(), seqs.end(), [](const auto& seq) { return seq.empty(); }))
+        throw std::invalid_argument("Invalid off-target primer sequences or seed length");
+}
+
+Automaton::Automaton(const std::vector<std::string>& labels,
+                     const std::vector<std::string>& seqs, std::size_t kmer_len,
+                     std::size_t threshold) : k(kmer_len) {
+    // With m substitutions, at least one of m+1 disjoint blocks is exact.
+    // Adjacent scoring can undercount substitutions by one (a terminal base).
+    const auto max_mismatches = threshold / 2 + threshold % 2;
+    for (const auto& seq : seqs)
+        k = std::min(k, seq.size() / (max_mismatches + 1));
+
     std::vector<std::string> data;
     for (std::size_t i = 0; i < labels.size(); i ++) {
         const std::string &forward = seqs[i], &reverse = revcomp(seqs[i]);
-        for (std::size_t j = 0; j + k <= forward.size(); j ++) {
+        // A zero-length seed is evaluated at every start when no exact base is guaranteed.
+        const auto seed_count = k == 0 ? 1 : max_mismatches + 1;
+        for (std::size_t block = 0; block < seed_count; ++block) {
+            const auto j = block * k;
             data.push_back(forward.substr(j, k));
             index2label.push_back(labels[i]);
             index2data.push_back(forward);
             index2pos.push_back(j);
             index2strand.push_back(i * 2);
         }
-        for (std::size_t j = 0; j + k <= reverse.size(); j ++) {
+        for (std::size_t block = 0; block < seed_count; ++block) {
+            const auto j = block * k;
             data.push_back(reverse.substr(j, k));
             index2label.push_back(labels[i]);
             index2data.push_back(reverse);
@@ -90,7 +109,13 @@ std::vector<Result> Automaton::search(const std::string &path,
                                       std::size_t chunk_size, 
                                       std::size_t io_block_size, 
                                       std::size_t nthreads) {
-    return process_fasta_chunks(path, 
+    for (const auto& sequence : sequences)
+        overlap = std::max(overlap, sequence.size() - 1);
+    if (overlap > std::numeric_limits<std::size_t>::max() - chunk_size)
+        throw std::invalid_argument("Single off-target chunk size overflow");
+
+    Automaton search_index(labels, sequences, k, threshold);
+    return search_index.process_fasta_chunks(path, 
                                 overlap,
                                 threshold,
                                 dg_thres,
@@ -102,6 +127,7 @@ std::vector<Result> Automaton::search(const std::string &path,
 std::size_t Automaton::search_chunk(const std::string& contig,
                                     const char* data,
                                     std::size_t len,
+                                    std::size_t owned_length,
                                     std::size_t index,
                                     std::size_t threshold,
                                     double dg_thres,
@@ -113,7 +139,7 @@ std::size_t Automaton::search_chunk(const std::string& contig,
     std::unordered_set<CandidateKey, CandidateKeyHash> active;
     std::deque<ActiveEntry> q;
 
-    for (std::size_t i = 0, j = index; i < len; i ++, j ++) {
+    for (std::size_t i = 0; i < len; i ++) {
         while (!q.empty() && q.front().expire_at < i) {
             active.erase(q.front().key);
             q.pop_front();
@@ -128,10 +154,11 @@ std::size_t Automaton::search_chunk(const std::string& contig,
         for (std::size_t k = 0; k < current->index.size(); k ++) {
             std::size_t seq_id = current->index[k], pos = index2pos[seq_id];
             std::string seq = index2data[seq_id], seq_ = seq;
-            if (this->k + pos > i + 1) continue;
+            const auto seed_end = i + (this->k != 0);
+            if (this->k + pos > seed_end) continue;
 
-            std::size_t start = i + 1 - this->k - pos;
-            if (start + seq.size() > len) continue;
+            std::size_t start = seed_end - this->k - pos;
+            if (start >= owned_length || start + seq.size() > len) continue;
 
             CandidateKey key{index2strand[seq_id], start};
             if (active.find(key) != active.end()) continue;
@@ -164,7 +191,7 @@ std::size_t Automaton::search_chunk(const std::string& contig,
                         seq,
                         contig,
                         seq_,
-                        i + 1 - this->k - pos,
+                        index + start,
                         index2strand[seq_id] % 2,
                         dg
                     }
@@ -183,7 +210,9 @@ std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
                                                     std::size_t chunk_size,
                                                     std::size_t io_block_size,
                                                     std::size_t nthreads) {
-    
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot open off-target reference: " + path);
+
     TaskQueue q(std::max<std::size_t>(2, nthreads * 2));
 
     std::vector<std::thread> workers;
@@ -202,6 +231,7 @@ std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
                               &q, 
                               &local_results = buckets[t], 
                               &local_counts = counts[t],
+                              chunk_size,
                               &threshold, 
                               &dg_thres,
                               &processed_chunks,
@@ -213,6 +243,7 @@ std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
                     x.contig, 
                     x.seq.data(), 
                     x.seq.size(), 
+                    x.is_last ? x.seq.size() : chunk_size,
                     x.start, 
                     threshold,
                     dg_thres,
@@ -227,13 +258,6 @@ std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
     }
 
     std::thread prod([&, this]() {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
-            std::cerr << "Error: Cannot open " << path << std::endl;
-            q.close();
-            return;
-        }
-
         // Progress tracking setup
         std::size_t contigs_processed = 0;
         std::size_t chunks_queued = 0;
@@ -395,6 +419,8 @@ std::vector<Result> Automaton::process_fasta_chunks(const std::string& path,
 
     prod.join();
     for (auto& th : workers) th.join();
+    if (in.bad() || !in.eof())
+        throw std::runtime_error("Error reading off-target reference: " + path);
 
     std::size_t total = 0;
     for (auto& count : counts) 

@@ -50,3 +50,13 @@ public:
     void add(std::unique_ptr<Stage> s) { stages_.push_back(std::move(s)); }
     void run(PipelineContext& ctx);
 };
+
+class PDRExpansionStage : public Stage {
+public:
+    std::string name() const { return "AffectedRegionExpansion"; }
+    std::string short_name() const { return "expand"; }
+    void run(PipelineContext& ctx);
+};
+
+bool expansion_layout_compatible(const std::vector<PrimerResult>& original,
+                                 const std::vector<PrimerResult>& trial);

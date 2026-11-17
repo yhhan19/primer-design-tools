@@ -1,9 +1,34 @@
 #pragma once
 #include "utility.hpp"
 #include "thal.hpp"
+#include <array>
+
+struct DimerCutoffMetrics {
+    std::size_t below_cutoff = 0;
+    std::size_t affected_amplicons = 0;
+    std::size_t affected_primers = 0;
+    double severity = 0;
+};
+
+struct DimerLandscapePoint {
+    double cutoff;
+    std::vector<index_t> solution;
+    DimerCutoffMetrics metrics;
+    std::size_t raw_affected_primers = 0;
+    unsigned seed = 0;
+    long time_ms = 0;
+};
 
 class KPartiteGraph {
     public:
+        void set_search_seeds(const std::vector<std::vector<index_t>>& seeds);
+        void enable_landscape(const std::vector<double>& cutoffs);
+        void enable_adaptive_landscape(double min_cutoff, double max_cutoff);
+        void finalize_landscape();
+        void optimize_landscape(std::size_t points, double min_cutoff, double max_cutoff,
+            bool adaptive, std::size_t restarts, std::size_t iterations, unsigned seed,
+            double selection_cutoff);
+        const std::vector<DimerLandscapePoint>& landscape() const { return landscape_points; }
         KPartiteGraph(const std::vector<PrimerOutput>& input, double dimer_min_c, double dimer_max_c,
                       const std::string& export_prefix = "");
         KPartiteGraph(index_t K, index_t N);
@@ -43,15 +68,44 @@ class KPartiteGraph {
             std::size_t restarts, std::size_t max_iter,
             double init_temp, double cooling, std::size_t allowed_bad,
             weight_t& out_threshold);
+        std::size_t count_below_cutoff(const std::vector<index_t>& solution, weight_t cutoff) const;
+        std::vector<index_t> solve_cutoff_sa(std::size_t restarts, std::size_t max_iter,
+            double init_temp, double cooling, weight_t cutoff, weight_t& out_score);
+        DimerCutoffMetrics dimer_cutoff_metrics(
+            const std::vector<index_t>& solution, weight_t cutoff) const;
+        std::vector<index_t> solve_affected_amplicons_sa(
+            std::size_t restarts, std::size_t max_iter, double init_temp,
+            double cooling, weight_t cutoff, weight_t& out_score);
+        std::vector<index_t> solve_affected_primers_sa(
+            std::size_t restarts, std::size_t max_iter, double init_temp,
+            double cooling, weight_t cutoff, weight_t& out_score);
+        std::vector<weight_t> selected_primer_worst_dg(
+            const std::vector<index_t>& solution) const;
+        weight_t primer_fraction_bound_score(
+            const std::vector<index_t>& solution, std::size_t allowed_primers) const;
+        std::vector<index_t> solve_primer_fraction_bound_sa(
+            std::size_t restarts, std::size_t max_iter, double init_temp,
+            double cooling, std::size_t allowed_primers, weight_t& out_bound);
+
         // Sum uses the same cross-partition edges and SA budget as rank search.
         weight_t dimer_sum_score(const std::vector<index_t>& solution) const;
         std::vector<index_t> solve_sum_sa(
             std::size_t restarts, std::size_t max_iter, double init_temp,
             double cooling, weight_t& out_score);
     private:
+        std::vector<std::vector<index_t>> search_seeds;
+        std::vector<DimerLandscapePoint> landscape_points;
+        bool adaptive_landscape = false;
+        double landscape_min = 0, landscape_max = 0;
+        std::vector<double> landscape_bounds;
+        std::vector<std::vector<index_t>> landscape_bound_panels;
+        void observe_panel(const std::vector<index_t>& solution);
+        enum class CutoffObjective { Pairs, Amplicons, Primers, PrimerBound };
         std::vector<index_t> solve_objective_sa(
             std::size_t restarts, std::size_t max_iter, double init_temp,
-            double cooling, std::size_t allowed_bad, weight_t& out_score, bool sum);
+            double cooling, std::size_t allowed_bad, weight_t& out_score, bool sum,
+            std::optional<weight_t> cutoff = std::nullopt,
+            CutoffObjective cutoff_objective = CutoffObjective::Pairs);
 
         weight_t *vertices;
         weight_t **graph, **opt_graph, **opt_graph_2;
@@ -76,7 +130,9 @@ class KPartiteGraph {
         // header
         std::vector<index_t> bottleneck_search_sa(std::size_t restarts, std::size_t max_iter,
                                                 double init_temp, double cooling,
-                                                weight_t& out_threshold, std::size_t allowed_bad = 0, bool sum = false);
+                                                weight_t& out_threshold, std::size_t allowed_bad = 0, bool sum = false,
+                                                std::optional<weight_t> cutoff = std::nullopt,
+                                                CutoffObjective cutoff_objective = CutoffObjective::Pairs);
 
 
 };

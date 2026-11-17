@@ -1,0 +1,73 @@
+# Step 1: explore cutoffs on the original candidate sets.
+
+# I/O
+input_file  = ./scripts/aligned_sequences
+output_file = results/btv-flow/landscape
+
+# PDR
+len_amp     = 420
+len_amp_min = 252
+len_PDR     = 40
+pdr_search  = midpoint
+pdr_min_candidates = 0
+u_max       = 10000
+u_min       = 0.10000000000000001
+seed        = 42
+
+# MSA pair filtering
+pair_keep_percent = 20
+pair_min_return = 5
+pair_max_mismatches = 2
+pair_max_3prime_mismatches = 0
+pair_3prime_window = 5
+
+# Dimer
+iter        = 1000
+dimer_restarts = 400
+dimer_methods = min-affected-primers
+expand_affected_pdrs = 0
+pdr_expansion_bases = 20
+dimer_rounds = 1
+dimer_landscape_points = 10
+dimer_landscape_adaptive = 1
+landscape_only = 1
+dimer_landscape_restarts = 200
+dimer_landscape_iterations = 1000
+dimer_landscape_min = -5000
+dimer_landscape_max = -2000
+dimer_select = min-affected-primers
+dimer_bad_percent = 1
+dimer_dg_cutoff = -3000
+dimer_temp_min = 58
+dimer_temp_max = 62
+
+# Off-target search
+off_target_mode = paired
+off_target_amp_min = 1
+off_target_amp_max = 1000
+kmer_len    = 8
+threshold   = 2
+threshold_mode = standard
+nthreads    = 8
+chunk_size  = 100000000
+block_size  = 134217728
+
+# Thermodynamics
+dg_thres    = -15000
+mv          = 50
+dv          = 1.5
+dntp        = 0.59999999999999998
+dna_conc    = 200
+temp        = 37
+
+# Primer3
+p3_opt_size = 20
+p3_min_size = 18
+p3_max_size = 25
+p3_opt_tm   = 60
+p3_min_tm   = 57
+p3_max_tm   = 63
+p3_min_gc   = 40
+p3_max_gc   = 60
+num_return  = 5
+

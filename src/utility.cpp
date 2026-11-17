@@ -172,7 +172,7 @@ key_t to_key(index_t f, index_t r, index_t f_, index_t r_) {
 }
 
 key_t to_key_2(index_t r, index_t r_) {
-    return (key_t) r + ((key_t) (r - r_) << 16);
+    return (static_cast<key_t>(r) << 32) | r_;
 }
 
 void to_index(key_t k, index_t &f, index_t &r, index_t &f_, index_t &r_) {
@@ -183,8 +183,8 @@ void to_index(key_t k, index_t &f, index_t &r, index_t &f_, index_t &r_) {
 }
 
 void to_index_2(key_t k, index_t &r, index_t &r_) {
-    r = k & 0xffff;
-    r_ = r - (k >> 16) & 0xffff;
+    r = static_cast<index_t>(k >> 32);
+    r_ = static_cast<index_t>(k);
 }
 
 std::size_t read_rate(std::string filename, std::vector<risk_t> &input) {
@@ -452,216 +452,6 @@ PrimerOutput extract_all(const p3retval* retval,
             extract_oligo(retval->rev.oligo[i], sa->sequence, true));
 
     return out;
-}
-
-static bool is_acgt(char c) {
-    return c == 'A' ||
-           c == 'C' ||
-           c == 'G' ||
-           c == 'T';
-}
-
-
-static double mismatch_weight_from_3prime(int distance) {
-    // distance = 0 means terminal 3' nucleotide
-    if (distance == 0) return 20.0;
-    if (distance == 1) return 12.0;
-    if (distance == 2) return 8.0;
-    if (distance <= 4) return 4.0;
-    if (distance <= 7) return 2.0;
-    return 1.0;
-}
-
-void score_primer_variants(
-    Oligo& oligo,
-    const std::vector<std::string>& sequences,
-    bool is_right
-) {
-    constexpr int THREE_PRIME_WINDOW = 5;
-
-    double mismatches = 0.0;
-    double valid_positions = 0.0;
-
-    double weighted_mismatches = 0.0;
-    double weighted_positions = 0.0;
-    double possible_positions = 0.0;
-    double binding_ddg_sum = 0.0;
-    std::size_t binding_ddg_count = 0;
-    std::unordered_map<std::string, double> binding_dg_cache;
-    const double perfect_binding_dg =
-        Thal::compute_dimer_dg(oligo.seq, oligo.seq);
-
-    std::size_t evaluated_genomes = 0;
-    std::size_t genomes_with_any_mismatch = 0;
-    std::size_t genomes_with_3prime_mismatch = 0;
-
-    for (const std::string& genome : sequences) {
-
-        if (oligo.start < 0 ||
-            oligo.length <= 0 ||
-            static_cast<std::size_t>(
-                oligo.start + oligo.length
-            ) > genome.size()) {
-            continue;
-        }
-
-        possible_positions += oligo.length;
-
-        const std::string target_subsequence = genome.substr(
-            static_cast<std::size_t>(oligo.start),
-            static_cast<std::size_t>(oligo.length));
-        const bool target_is_valid = std::all_of(
-            target_subsequence.begin(), target_subsequence.end(), is_acgt);
-        if (target_is_valid) {
-            auto cached = binding_dg_cache.find(target_subsequence);
-            if (cached == binding_dg_cache.end()) {
-                cached = binding_dg_cache.emplace(
-                    target_subsequence,
-                    Thal::compute_dimer_dg(oligo.seq, target_subsequence)
-                ).first;
-            }
-            binding_ddg_sum += cached->second - perfect_binding_dg;
-            ++binding_ddg_count;
-        }
-
-        bool has_valid_position = false;
-        bool has_any_mismatch = false;
-        bool has_3prime_mismatch = false;
-
-        for (int j = 0; j < oligo.length; ++j) {
-
-            const char primer_base = oligo.seq[j];
-
-            /*
-             * IMPORTANT:
-             *
-             * Your current extract_oligo() stores o.seq as the
-             * forward-template substring for BOTH left and right
-             * primers.
-             *
-             * Therefore we compare directly against the same
-             * forward-reference coordinate here.
-             */
-            const char genome_base =
-                genome[oligo.start + j];
-
-            if (!is_acgt(primer_base) ||
-                !is_acgt(genome_base)) {
-                continue;
-            }
-
-            has_valid_position = true;
-
-            const bool mismatch =
-                primer_base != genome_base;
-
-            /*
-             * LEFT primer:
-             *
-             * reference:
-             *     5' -----------------> 3'
-             *                            ^
-             *                         primer 3'
-             *
-             * so increasing j approaches the 3' end.
-             *
-             *
-             * RIGHT primer:
-             *
-             * stored sequence is still the forward-template
-             * substring:
-             *
-             * reference:
-             *     5' -----------------> 3'
-             *         ^
-             *      primer 3'
-             *
-             * so j=0 corresponds to the reverse primer's 3' end.
-             */
-            const int distance_from_3prime =
-                is_right
-                    ? j
-                    : (oligo.length - 1 - j);
-
-            const double weight =
-                mismatch_weight_from_3prime(
-                    distance_from_3prime
-                );
-
-            valid_positions += 1.0;
-            weighted_positions += weight;
-
-            if (mismatch) {
-                mismatches += 1.0;
-                weighted_mismatches += weight;
-
-                has_any_mismatch = true;
-
-                if (distance_from_3prime <
-                    THREE_PRIME_WINDOW) {
-                    has_3prime_mismatch = true;
-                }
-            }
-        }
-
-        if (has_valid_position) {
-            ++evaluated_genomes;
-
-            if (has_any_mismatch)
-                ++genomes_with_any_mismatch;
-
-            if (has_3prime_mismatch)
-                ++genomes_with_3prime_mismatch;
-        }
-    }
-
-    if (valid_positions > 0.0) {
-        oligo.mismatch_rate =
-            mismatches / valid_positions;
-    } else {
-        oligo.mismatch_rate = 1.0;
-    }
-
-    oligo.coverage_rate =
-        possible_positions > 0.0
-            ? valid_positions / possible_positions
-            : 0.0;
-
-    if (weighted_positions > 0.0) {
-        oligo.weighted_mismatch =
-            weighted_mismatches /
-            weighted_positions;
-    } else {
-        oligo.weighted_mismatch = 1.0;
-    }
-
-    oligo.mean_binding_ddg = binding_ddg_count > 0
-        ? binding_ddg_sum / static_cast<double>(binding_ddg_count)
-        : std::numeric_limits<double>::quiet_NaN();
-
-    if (evaluated_genomes > 0) {
-
-        oligo.genome_mismatch_rate =
-            static_cast<double>(
-                genomes_with_any_mismatch
-            ) /
-            static_cast<double>(
-                evaluated_genomes
-            );
-
-        oligo.mismatch_3prime_rate =
-            static_cast<double>(
-                genomes_with_3prime_mismatch
-            ) /
-            static_cast<double>(
-                evaluated_genomes
-            );
-
-    } else {
-
-        oligo.genome_mismatch_rate = 1.0;
-        oligo.mismatch_3prime_rate = 1.0;
-    }
 }
 
 RemovalSets computeRemoval(const std::vector<const Result*>& output_results,
@@ -1042,6 +832,122 @@ void print_solution(const std::vector<PrimerResult>& solution) {
     std::cout << std::string(TOTAL, '-') << "\n\n";
 }
 
+struct PoolDimerSummary {
+    std::size_t amplicons = 0, affected_amplicons = 0, bad_pairs = 0;
+    std::size_t affected_primers = 0;
+    double severity = 0;
+    double cutoff = 0;
+};
+
+static std::map<std::size_t, PoolDimerSummary> summarize_dimers(
+    const std::vector<PrimerResult>& solution) {
+    std::map<std::size_t, PoolDimerSummary> pools;
+    for (const auto& pair : solution) {
+        if (!pair.left.dimer_risk.cutoff || !pair.right.dimer_risk.cutoff) continue;
+        auto& pool = pools[pair.pool];
+        ++pool.amplicons;
+        pool.affected_amplicons += !pair.left.dimer_risk.partners.empty() ||
+                                  !pair.right.dimer_risk.partners.empty();
+        pool.cutoff = *pair.left.dimer_risk.cutoff;
+        for (const auto* primer : {&pair.left, &pair.right}) {
+            pool.affected_primers += !primer->dimer_risk.partners.empty();
+            pool.bad_pairs += primer->dimer_risk.partners.size();
+            for (const auto& partner : primer->dimer_risk.partners)
+                pool.severity += *primer->dimer_risk.cutoff - partner.dg;
+        }
+    }
+    for (auto& entry : pools) {
+        entry.second.bad_pairs /= 2;
+        entry.second.severity /= 2; // Each pair appears at both primer endpoints.
+    }
+    return pools;
+}
+
+void annotate_solution_dimers(const std::vector<SegmentContext>& segments,
+                              std::vector<PrimerResult>& solution,
+                              double cutoff, double min_c, double max_c,
+                              const std::string& output_prefix) {
+    if (!std::isfinite(cutoff))
+        throw std::invalid_argument("Dimer annotation cutoff must be finite");
+    Thal::validate_dimer_range(min_c, max_c);
+    std::vector<std::size_t> order(solution.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        const auto& first = solution[a];
+        const auto& second = solution[b];
+        if (first.segment_id != second.segment_id)
+            return first.segment_id < second.segment_id;
+        return std::min(first.left.start, first.right.start) <
+               std::min(second.left.start, second.right.start);
+    });
+
+    struct FinalPrimer {
+        Oligo* oligo;
+        std::string name;
+        std::string sequence;
+        std::size_t pool;
+    };
+    std::vector<FinalPrimer> primers(solution.size() * 2);
+    std::map<std::size_t, std::size_t> segment_counts;
+    for (const auto index : order) {
+        auto& result = solution[index];
+        const auto prefix = segments.at(result.segment_id).name + "_" +
+                            std::to_string(++segment_counts[result.segment_id]);
+        result.left.dimer_risk = {cutoff, {}};
+        result.right.dimer_risk = {cutoff, {}};
+        primers[2 * index] = {&result.left, prefix + "_LEFT_1", result.left.seq, result.pool};
+        primers[2 * index + 1] = {&result.right, prefix + "_RIGHT_1", revcomp(result.right.seq), result.pool};
+    }
+
+    const auto path = output_prefix + ".bad-dimers.tsv";
+    std::ofstream report(path);
+    if (!report) throw std::runtime_error("Cannot write " + path);
+    report << "pool\tprimer_a\tprimer_b\tdg_cal_per_mol\tcutoff_cal_per_mol"
+           << "\ttemp_min_c\ttemp_max_c\n"
+           << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (std::size_t i = 0; i < primers.size(); ++i) {
+        for (std::size_t j = i + 1; j < primers.size(); ++j) {
+            auto& a = primers[i];
+            auto& b = primers[j];
+            if (a.pool != b.pool) continue;
+            const double dg = Thal::compute_dimer_worst_dg(
+                a.sequence, b.sequence, min_c, max_c);
+            if (!std::isfinite(dg))
+                throw std::runtime_error("Non-finite selected primer dimer score");
+            if (dg >= cutoff) continue;
+            a.oligo->dimer_risk.partners.push_back({b.name, dg});
+            b.oligo->dimer_risk.partners.push_back({a.name, dg});
+            report << a.pool << '\t' << a.name << '\t' << b.name << '\t' << dg
+                   << '\t' << cutoff << '\t' << min_c << '\t' << max_c << '\n';
+        }
+    }
+    for (auto& primer : primers)
+        std::sort(primer.oligo->dimer_risk.partners.begin(),
+                  primer.oligo->dimer_risk.partners.end(),
+                  [](const DimerPartner& a, const DimerPartner& b) { return a.dg < b.dg; });
+    report.close();
+    if (!report) throw std::runtime_error("Failed writing " + path);
+    std::cout << "Selected below-cutoff dimer pairs written to: " << path << "\n";
+    const auto summary_path = output_prefix + ".dimer-summary.tsv";
+    std::ofstream summary(summary_path);
+    if (!summary) throw std::runtime_error("Cannot write " + summary_path);
+    summary << "pool\taffected_amplicons\tamplicons\taffected_amplicon_percent"
+            << "\tseverity_cal_per_mol\tbelow_cutoff_pairs\tcutoff_cal_per_mol"
+            << "\taffected_primers\tprimers\taffected_primer_percent\n"
+            << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (const auto& entry : summarize_dimers(solution)) {
+        const auto& pool = entry.second;
+        summary << entry.first << '\t' << pool.affected_amplicons << '\t'
+                << pool.amplicons << '\t' << 100.0 * pool.affected_amplicons / pool.amplicons
+                << '\t' << pool.severity << '\t' << pool.bad_pairs << '\t' << pool.cutoff
+                << '\t' << pool.affected_primers << '\t' << 2 * pool.amplicons
+                << '\t' << 100.0 * pool.affected_primers / (2 * pool.amplicons) << '\n';
+    }
+    summary.close();
+    if (!summary) throw std::runtime_error("Failed writing " + summary_path);
+    std::cout << "Dimer impact summary written to: " << summary_path << "\n";
+}
+
 void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& solution, const std::string& filename) {
     std::ofstream out(filename);
     if (!out) {
@@ -1068,6 +974,7 @@ void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& 
         std::string seq;
         char        strand;
         int         amp_idx;  // filled after per-seg counting
+        PrimerDimerRisk dimer_risk;
     };
 
     std::vector<PrimerEntry> entries;
@@ -1079,11 +986,11 @@ void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& 
 
         entries.push_back({ r.segment_id,
                             r.left.start, r.left.start + r.left.length,
-                            r.pool, r.left.seq, '+', cnt });
+                            r.pool, r.left.seq, '+', cnt, r.left.dimer_risk });
 
         entries.push_back({ r.segment_id,
                             r.right.start, r.right.start + r.right.length,
-                            r.pool, r.right.seq, '-', cnt });
+                            r.pool, r.right.seq, '-', cnt, r.right.dimer_risk });
     }
 
     // Sort all individual primers by segment then start position
@@ -1105,7 +1012,24 @@ void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& 
             << name         << "\t"
             << e.pool       << "\t"
             << e.strand     << "\t"
-            << e.seq        << "\n";
+            << e.seq        << "\t";
+        if (!e.dimer_risk.cutoff) {
+            out << "NOT_EVALUATED\t.\t.\t.\t.\n";
+            continue;
+        }
+        const auto& partners = e.dimer_risk.partners;
+        out << (partners.empty() ? "NONE_BELOW_CUTOFF" : "BELOW_CUTOFF") << '\t'
+            << partners.size() << '\t'
+            << std::setprecision(std::numeric_limits<double>::max_digits10);
+        if (partners.empty()) out << '.';
+        else out << partners.front().dg;
+        out << '\t' << *e.dimer_risk.cutoff << '\t';
+        if (partners.empty()) out << '.';
+        for (std::size_t i = 0; i < partners.size(); ++i) {
+            if (i) out << ',';
+            out << partners[i].primer_name;
+        }
+        out << '\n';
     }
 
     std::cout << "Solution written to: " << filename << "\n";
@@ -1125,6 +1049,26 @@ static std::string xml_escape(const std::string& text) {
         }
     }
     return escaped;
+}
+
+static std::string dimer_tooltip(const PrimerDimerRisk& risk) {
+    if (!risk.cutoff) return "&#10;Dimer status: NOT_EVALUATED";
+    std::ostringstream text;
+    text << "&#10;Dimer status: "
+         << (risk.partners.empty() ? "NONE_BELOW_CUTOFF" : "BELOW_CUTOFF")
+         << "&#10;Dimer cutoff: " << std::fixed << std::setprecision(2)
+         << *risk.cutoff << " cal/mol"
+         << "&#10;Dimer partner count: " << risk.partners.size();
+    if (!risk.partners.empty())
+        text << "&#10;Dimer worst dG: " << risk.partners.front().dg << " cal/mol";
+    const auto shown = std::min<std::size_t>(risk.partners.size(), 5);
+    for (std::size_t i = 0; i < shown; ++i)
+        text << "&#10;Dimer partner: " << xml_escape(risk.partners[i].primer_name)
+             << " (" << risk.partners[i].dg << " cal/mol)";
+    if (risk.partners.size() > shown)
+        text << "&#10;Dimer partners remaining: " << risk.partners.size() - shown
+             << " (see .bad-dimers.tsv)";
+    return text.str();
 }
 
 void save_coverage_report(const std::vector<SegmentContext>& segments,
@@ -1169,9 +1113,18 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
     const double svg_width = X0 + RIGHT_MARGIN +
         std::max(1.0, maximum_template_length * PIXELS_PER_BASE);
     const std::size_t total_rows = segments.size();
-    const double svg_height = 45.0 +
+    const auto pool_summaries = summarize_dimers(solution);
+    const double summary_height = 16.0 * pool_summaries.size();
+    const double svg_height = 61.0 + summary_height +
         total_rows * ROW_HEIGHT +
         segments.size() * (SEGMENT_HEADER_HEIGHT + 15.0);
+
+    struct PrimerEndpoint {
+        double x, y;
+        std::size_t pool;
+        PrimerDimerRisk risk;
+    };
+    std::map<std::string, PrimerEndpoint> primer_endpoints;
 
     svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\""
         << svg_width << "\" height=\"" << svg_height
@@ -1181,13 +1134,36 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
         << ".axis{stroke:#334155;stroke-width:1}.gap{fill:#ef4444;opacity:.75}"
         << ".p1{fill:#2563eb;stroke:#1d4ed8}.p2{fill:#16a34a;stroke:#15803d}"
         << ".primer{cursor:pointer}.primer-label{font-size:10px;pointer-events:none}"
+        << ".bad-dimer{stroke:#f97316;stroke-width:2.5}"
+        << ".bad-dimer-label{fill:#c2410c;font-weight:bold}"
+        << ".dimer-link{opacity:.4}.dimer-connection{fill:none;stroke:#ea580c;stroke-width:1.8;pointer-events:stroke}"
+        << ".dimer-endpoint{fill:#ea580c;pointer-events:none}"
+        << ".dimer-link:hover{opacity:1}.dimer-link:hover .dimer-connection{stroke-width:3.5}"
+        << ".dimer-focus .dimer-link{opacity:.04}.dimer-focus .dimer-link.active{opacity:1}"
+        << ".dimer-focus .dimer-link.active .dimer-connection{stroke-width:3}"
         << ".primer:hover{opacity:.78}.primer-tooltip text{font-size:12px;fill:#f8fafc}"
         << ".primer-tooltip .heading{font-weight:bold;font-size:13px}"
         << ".primer-tooltip .sequence{font-family:Consolas,monospace;white-space:pre}"
         << ".invalid{fill:#9ca3af;stroke:#dc2626;stroke-width:2}</style>\n"
         << "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n"
         << "<text x=\"20\" y=\"27\" class=\"title\">Multiplex amplicon coverage</text>\n"
-        << "<text x=\"430\" y=\"27\">Variation: pale = conserved, red = variable, gray = no valid calls</text>\n";
+        << "<text x=\"430\" y=\"27\">Variation: pale = conserved, red = variable, gray = no valid calls</text>\n"
+        << "<text x=\"20\" y=\"45\" fill=\"#c2410c\">Orange curves connect below-cutoff dimer pairs; * marks affected primers (hover to highlight)</text>\n";
+    double summary_y = 63.0;
+    for (const auto& entry : pool_summaries) {
+        const auto& pool = entry.second;
+        svg << "<text x=\"20\" y=\"" << summary_y << "\">Pool "
+            << entry.first << " — affected primers " << pool.affected_primers << "/"
+            << 2 * pool.amplicons << " (" << std::fixed << std::setprecision(1)
+            << 100.0 * pool.affected_primers / (2 * pool.amplicons)
+            << "%); amplicons "
+            << pool.affected_amplicons << "/" << pool.amplicons << " ("
+            << std::fixed << std::setprecision(1)
+            << 100.0 * pool.affected_amplicons / pool.amplicons
+            << "%); severity " << std::setprecision(2) << pool.severity / 1000.0
+            << " kcal/mol</text>\n";
+        summary_y += 16.0;
+    }
 
     tsv << "record\tsegment\tindex\tstart\tend\tlength\tpool\tvalid"
         << "\tcovered_bases\tcoverage_percent\tgap_count\tproblem\n";
@@ -1195,7 +1171,7 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
         << "segment\tposition\ttemplate_base\tvalid_sequences\ttotal_sequences"
         << "\tvariation_rate\tmissing_rate\tA\tC\tG\tT\n";
 
-    double segment_top = 48.0;
+    double segment_top = 64.0 + summary_height;
     for (std::size_t segment_id = 0; segment_id < segments.size(); ++segment_id) {
         const auto& segment = segments[segment_id];
         const std::size_t template_length = segment.tmpl.size();
@@ -1422,6 +1398,7 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
                 if (!amp.problem.empty()) svg << "; " << xml_escape(amp.problem);
                 svg << "</title></rect>\n";
 
+                const auto name_prefix = segment.name + "_" + std::to_string(amp.index);
                 auto primer_detail_attributes = [&](const Oligo& oligo,
                                                      std::size_t start,
                                                      std::size_t end,
@@ -1450,7 +1427,9 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
                     }
 
                     std::ostringstream attributes;
-                    attributes << " data-primer-seq=\""
+                    attributes << " data-primer-id=\""
+                               << xml_escape(name_prefix + (is_right ? "_RIGHT_1" : "_LEFT_1"))
+                               << "\" data-primer-seq=\""
                                << xml_escape(primer_sequence)
                                << "\" data-target-seq=\""
                                << xml_escape(target_sequence)
@@ -1464,9 +1443,12 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
                 if (amp.valid && amp.left_end > row_start && amp.left_start < row_end) {
                     const double lx1 = xpos(amp.left_start);
                     const double lx2 = xpos(amp.left_end);
+                    primer_endpoints[name_prefix + "_LEFT_1"] = {
+                        (lx1 + lx2) / 2.0, y + 6, amp.pool, amp.left.dimer_risk};
                     svg << "<polygon points=\"" << lx1 << "," << y - 3 << " "
                         << lx1 << "," << y + 15 << " " << lx2 << "," << y + 6
-                        << "\" fill=\"#0f172a\" class=\"primer\""
+                        << "\" fill=\"#0f172a\" class=\"primer"
+                        << (amp.left.dimer_risk.partners.empty() ? "" : " bad-dimer") << "\""
                         << primer_detail_attributes(amp.left, amp.left_start,
                                                     amp.left_end, false)
                         << "><title>LEFT primer "
@@ -1476,25 +1458,24 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
                         << amp.left_end << "&#10;Length: " << amp.left.length
                         << "&#10;Tm: " << std::fixed << std::setprecision(2)
                         << amp.left.tm << " C&#10;GC: " << amp.left.gc
-                        << "%&#10;Mismatch: " << std::setprecision(4)
-                        << amp.left.mismatch_rate << "&#10;Mean binding ddG: "
-                        << amp.left.mean_binding_ddg << " cal/mol&#10;Genome mismatch: "
-                        << amp.left.genome_mismatch_rate << "&#10;3prime mismatch: "
-                        << amp.left.mismatch_3prime_rate << "&#10;Weighted mismatch: "
-                        << amp.left.weighted_mismatch << "&#10;Coverage: "
-                        << amp.left.coverage_rate
+                        << "%"
+                        << dimer_tooltip(amp.left.dimer_risk)
                         << "</title></polygon>\n";
                     svg << "<text x=\"" << (lx1 + lx2) / 2.0
                         << "\" y=\"" << y - 5
-                        << "\" text-anchor=\"middle\" class=\"primer-label\">L"
-                        << amp.index << "</text>\n";
+                        << "\" text-anchor=\"middle\" class=\"primer-label"
+                        << (amp.left.dimer_risk.partners.empty() ? "" : " bad-dimer-label") << "\">L"
+                        << amp.index << (amp.left.dimer_risk.partners.empty() ? "" : "*") << "</text>\n";
                 }
                 if (amp.valid && amp.right_end > row_start && amp.right_start < row_end) {
                     const double rx1 = xpos(amp.right_start);
                     const double rx2 = xpos(amp.right_end);
+                    primer_endpoints[name_prefix + "_RIGHT_1"] = {
+                        (rx1 + rx2) / 2.0, y + 6, amp.pool, amp.right.dimer_risk};
                     svg << "<polygon points=\"" << rx2 << "," << y - 3 << " "
                         << rx2 << "," << y + 15 << " " << rx1 << "," << y + 6
-                        << "\" fill=\"#0f172a\" class=\"primer\""
+                        << "\" fill=\"#0f172a\" class=\"primer"
+                        << (amp.right.dimer_risk.partners.empty() ? "" : " bad-dimer") << "\""
                         << primer_detail_attributes(amp.right, amp.right_start,
                                                     amp.right_end, true)
                         << "><title>RIGHT primer "
@@ -1504,18 +1485,14 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
                         << amp.right_end << "&#10;Length: " << amp.right.length
                         << "&#10;Tm: " << std::fixed << std::setprecision(2)
                         << amp.right.tm << " C&#10;GC: " << amp.right.gc
-                        << "%&#10;Mismatch: " << std::setprecision(4)
-                        << amp.right.mismatch_rate << "&#10;Mean binding ddG: "
-                        << amp.right.mean_binding_ddg << " cal/mol&#10;Genome mismatch: "
-                        << amp.right.genome_mismatch_rate << "&#10;3prime mismatch: "
-                        << amp.right.mismatch_3prime_rate << "&#10;Weighted mismatch: "
-                        << amp.right.weighted_mismatch << "&#10;Coverage: "
-                        << amp.right.coverage_rate
+                        << "%"
+                        << dimer_tooltip(amp.right.dimer_risk)
                         << "</title></polygon>\n";
                     svg << "<text x=\"" << (rx1 + rx2) / 2.0
                         << "\" y=\"" << y - 5
-                        << "\" text-anchor=\"middle\" class=\"primer-label\">R"
-                        << amp.index << "</text>\n";
+                        << "\" text-anchor=\"middle\" class=\"primer-label"
+                        << (amp.right.dimer_risk.partners.empty() ? "" : " bad-dimer-label") << "\">R"
+                        << amp.index << (amp.right.dimer_risk.partners.empty() ? "" : "*") << "</text>\n";
                 }
             }
 
@@ -1534,6 +1511,36 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
         segment_top += SEGMENT_HEADER_HEIGHT + row_count * ROW_HEIGHT + 15.0;
     }
 
+    svg << "<g id=\"dimer-connections\">\n";
+    for (const auto& entry : primer_endpoints) {
+        const auto& name = entry.first;
+        const auto& first = entry.second;
+        for (const auto& partner : first.risk.partners) {
+            if (name >= partner.primer_name) continue;
+            const auto target = primer_endpoints.find(partner.primer_name);
+            if (target == primer_endpoints.end() || first.pool != target->second.pool) continue;
+            const auto& second = target->second;
+            const double control_y = std::min(first.y, second.y) - 32.0;
+            svg << "<g class=\"dimer-link\" data-primer-a=\"" << xml_escape(name)
+                << "\" data-primer-b=\"" << xml_escape(partner.primer_name)
+                << "\" data-dg=\"" << std::setprecision(8) << partner.dg << "\">"
+                << "<title>" << xml_escape(name) << " &lt;-&gt; " << xml_escape(partner.primer_name)
+                << "&#10;Pool: " << first.pool << "&#10;Dimer dG: "
+                << std::fixed << std::setprecision(2) << partner.dg << " cal/mol";
+            if (first.risk.cutoff)
+                svg << "&#10;Cutoff: " << *first.risk.cutoff << " cal/mol";
+            svg << "</title><path class=\"dimer-connection\" d=\"M "
+                << first.x << " " << first.y << " C " << first.x << " " << control_y
+                << ", " << second.x << " " << control_y << ", "
+                << second.x << " " << second.y << "\"/>"
+                << "<circle class=\"dimer-endpoint\" cx=\"" << first.x
+                << "\" cy=\"" << first.y << "\" r=\"2.5\"/>"
+                << "<circle class=\"dimer-endpoint\" cx=\"" << second.x
+                << "\" cy=\"" << second.y << "\" r=\"2.5\"/></g>\n";
+        }
+    }
+    svg << "</g>\n";
+
     // A native SVG <title> is useful as a no-script fallback, but its tooltip
     // is delayed and varies by viewer.  Upgrade primer titles to a consistent,
     // pointer-following tooltip when the SVG is opened in a browser.
@@ -1549,6 +1556,7 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
   const text = tooltip.querySelector('text');
   const padding = 10;
   const lineHeight = 17;
+  const dimerLinks = Array.from(root.querySelectorAll('.dimer-link'));
 
   function point(event) {
     const p = root.createSVGPoint();
@@ -1601,6 +1609,12 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
     title.remove();
 
     primer.addEventListener('pointerenter', function (event) {
+      root.classList.add('dimer-focus');
+      dimerLinks.forEach(function (link) {
+        link.classList.toggle('active',
+          link.dataset.primerA === primer.dataset.primerId ||
+          link.dataset.primerB === primer.dataset.primerId);
+      });
       text.replaceChildren();
       const metadata = Object.fromEntries(detail.split('\n').slice(1).map(function (line) {
         const separator = line.indexOf(':');
@@ -1624,13 +1638,11 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
       const lines = [
         detail.split('\n')[0],
         'Pool ' + metadata.Pool + '  |  Coordinates ' + metadata.Coordinates,
-        'Tm ' + metadata.Tm + '  |  GC ' + metadata.GC,
-        'Mismatch ' + metadata.Mismatch + '  |  Weighted ' +
-          metadata['Weighted mismatch'] + '  |  Coverage ' + metadata.Coverage,
-        'Genome mismatch ' + metadata['Genome mismatch'] +
-          "  |  3' mismatch " + metadata['3prime mismatch'],
-        'Mean binding ddG ' + metadata['Mean binding ddG']
+        'Tm ' + metadata.Tm + '  |  GC ' + metadata.GC
       ];
+      lines.push(...detail.split('\n').filter(function (line) {
+        return line.startsWith('Dimer ');
+      }));
       for (let start = 0; start < primerBases.length; start += columnsPerBlock) {
         const end = start + columnsPerBlock;
         lines.push(tokenRow('Position', positions.slice(start, end)));
@@ -1659,6 +1671,7 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
     });
     primer.addEventListener('pointermove', move);
     primer.addEventListener('pointerleave', function () {
+      root.classList.remove('dimer-focus');
       tooltip.setAttribute('visibility', 'hidden');
     });
   });

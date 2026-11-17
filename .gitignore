@@ -1,0 +1,13 @@
+bin
+build
+scripts
+.vscode
+log
+note
+data
+test
+!scripts/
+scripts/*
+!scripts/plot_pdr_expansion.py
+dpro-error.log
+.dpro-dimer-cache/

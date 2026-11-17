@@ -1,4 +1,5 @@
 #include "graph.hpp"
+#include "run_log.hpp"
 
 KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
                            double dimer_min_c, double dimer_max_c,
@@ -50,7 +51,7 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
         }
     };
 
-    // collect all edges to compute
+    // Collect all required edges; the energy cache resolves unchanged ones.
     std::vector<std::pair<index_t, index_t>> edges;
     for (index_t i = 0; i < K * N; i++)
         for (index_t j = i + 1; j < K * N; j++)
@@ -112,7 +113,7 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
     const int TW = 14 + 4 + 10 + 6;
     std::cout << "K = " << K << " N = " << N
               << " nodes = " << K * N << "\n"
-              << "edges to compute = " << total_edges << "\n\n"
+              << "required edges = " << total_edges << "\n\n"
               << "Constructing KPartite Graph...\n"
               << std::string(TW, '-') << "\n"
               << std::right
@@ -134,20 +135,36 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
     for (index_t i = 0; i < K * N; i++)
         vertices[i] = 0;
 
-    // precompute results in parallel
+    // Right candidates are stored in reference orientation.
+    std::vector<std::string> primer_sequences(K * N);
+    for (index_t p = 0; p < K; ++p) {
+        for (index_t n = 0; n < valid_N[p]; ++n) {
+            const auto id = index(p, n);
+            const auto& sequence = get_oligo(id)->seq;
+            primer_sequences[id] = p % 2 ? revcomp(sequence) : sequence;
+        }
+    }
+
+    // Compute only cache misses; concurrent duplicate requests share one result.
+    const auto cache_before = Thal::dimer_cache_stats();
     std::vector<weight_t> results(edges.size());
     std::atomic<std::size_t> count(0);
     std::size_t step = std::max((std::size_t)1, total_edges / 20);
 
-    unsigned int nthreads = std::thread::hardware_concurrency();
+    std::atomic<bool> failed(false);
+    std::exception_ptr worker_error;
+    std::mutex error_mutex;
+    unsigned int nthreads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> threads(nthreads);
 
     for (unsigned int t = 0; t < nthreads; t++) {
         threads[t] = std::thread([&, t]() {
+            try {
             for (std::size_t e = t; e < edges.size(); e += nthreads) {
+                if (failed.load()) break;
                 auto [i, j] = edges[e];
                 results[e] = Thal::compute_dimer_worst_dg(
-                    get_oligo(i)->seq, get_oligo(j)->seq,
+                    primer_sequences[i], primer_sequences[j],
                     dimer_min_c, dimer_max_c);
                 std::size_t c = count.fetch_add(1) + 1;
                 if (c % step == 0) {
@@ -162,9 +179,25 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
                               << std::setw(5)  << pct << "%\n";
                 }
             }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(error_mutex);
+                if (!worker_error) worker_error = std::current_exception();
+                failed.store(true);
+            }
         });
     }
     for (auto& th : threads) th.join();
+    if (worker_error) {
+        for (index_t i = 0; i < K * N; ++i) delete [] graph[i];
+        delete [] graph;
+        delete [] vertices;
+        std::rethrow_exception(worker_error);
+    }
+    Thal::flush_dimer_cache();
+    const auto cache_after = Thal::dimer_cache_stats();
+    const auto reused = cache_after.reused - cache_before.reused;
+    std::cout << "Dimer cache: reused " << reused << ", computed "
+              << total_edges - reused << " of " << total_edges << " interactions\n";
 
     // Replace the initial unweighted edge list only after every score exists.
     if (!export_prefix.empty()) {
@@ -208,7 +241,7 @@ KPartiteGraph::KPartiteGraph(const std::vector<PrimerOutput>& input,
     }
 
     std::cout << std::string(TW, '-') << "\n"
-              << "Computed " << count << " edge weights.\n\n";
+              << "Populated " << count << " edge weights.\n\n";
 }
 
 KPartiteGraph::KPartiteGraph(index_t K, index_t N) {
@@ -1065,6 +1098,177 @@ void KPartiteGraph::validate_pair_choices(const std::vector<index_t>& solution) 
     }
 }
 
+void KPartiteGraph::set_search_seeds(const std::vector<std::vector<index_t>>& seeds) {
+    for (const auto& solution : seeds) {
+        if (solution.size() != K) throw std::invalid_argument("Seed panel size must equal K");
+        for (index_t p = 0; p < K; ++p)
+            if (solution[p] >= (valid_N.empty() ? N : valid_N[p]))
+                throw std::invalid_argument("Seed panel candidate out of range");
+        validate_pair_choices(solution);
+    }
+    search_seeds = seeds;
+}
+
+void KPartiteGraph::enable_landscape(const std::vector<double>& cutoffs) {
+    adaptive_landscape = false;
+    landscape_points.clear();
+    for (double cutoff : cutoffs) {
+        if (!std::isfinite(cutoff)) throw std::invalid_argument("Landscape cutoff must be finite");
+        landscape_points.push_back({cutoff, {}, {}});
+    }
+}
+
+void KPartiteGraph::enable_adaptive_landscape(double min_cutoff, double max_cutoff) {
+    if (!std::isfinite(min_cutoff) || !std::isfinite(max_cutoff) || min_cutoff >= max_cutoff)
+        throw std::invalid_argument("Adaptive landscape requires finite min < max");
+    adaptive_landscape = true;
+    landscape_min = min_cutoff;
+    landscape_max = max_cutoff;
+    landscape_bounds.assign(K, -std::numeric_limits<double>::infinity());
+    landscape_bound_panels.assign(K, {});
+}
+
+void KPartiteGraph::finalize_landscape() {
+    if (!adaptive_landscape) return;
+    std::vector<double> cutoffs{landscape_min, landscape_max};
+    for (const auto& point : landscape_points) cutoffs.push_back(point.cutoff);
+    for (double bound : landscape_bounds) {
+        if (bound >= landscape_min && bound <= landscape_max) {
+            cutoffs.push_back(bound);
+            const double above = std::nextafter(bound, std::numeric_limits<double>::infinity());
+            if (above <= landscape_max) cutoffs.push_back(above);
+        }
+    }
+    std::sort(cutoffs.begin(), cutoffs.end());
+    cutoffs.erase(std::unique(cutoffs.begin(), cutoffs.end()), cutoffs.end());
+    std::vector<std::vector<index_t>> panels;
+    for (const auto& panel : landscape_bound_panels)
+        if (!panel.empty() && std::find(panels.begin(), panels.end(), panel) == panels.end())
+            panels.push_back(panel);
+    landscape_points.clear();
+    for (double cutoff : cutoffs) {
+        DimerLandscapePoint point{cutoff, {}, {}};
+        for (const auto& panel : panels) {
+            const auto metrics = dimer_cutoff_metrics(panel, cutoff);
+            if (point.solution.empty() || metrics.affected_primers < point.metrics.affected_primers) {
+                point.solution = panel;
+                point.metrics = metrics;
+            }
+        }
+        landscape_points.push_back(std::move(point));
+    }
+}
+
+void KPartiteGraph::observe_panel(const std::vector<index_t>& solution) {
+    if (adaptive_landscape) {
+        auto minima = selected_primer_worst_dg(solution);
+        std::sort(minima.begin(), minima.end());
+        for (std::size_t k = 0; k < minima.size(); ++k)
+            if (minima[k] > landscape_bounds[k]) {
+                landscape_bounds[k] = minima[k];
+                landscape_bound_panels[k] = solution;
+            }
+        return; // Ranked witnesses recover the exact observed count envelope at export.
+    }
+    for (auto& point : landscape_points) {
+        const auto metrics = dimer_cutoff_metrics(solution, point.cutoff);
+        if (point.solution.empty() || metrics.affected_primers < point.metrics.affected_primers) {
+            point.solution = solution;
+            point.metrics = metrics;
+        }
+    }
+}
+
+void KPartiteGraph::optimize_landscape(std::size_t points, double min_cutoff,
+    double max_cutoff, bool adaptive, std::size_t restarts, std::size_t iterations,
+    unsigned seed, double selection_cutoff) {
+    if (points < 2 || !restarts || !iterations || !std::isfinite(min_cutoff) ||
+        !std::isfinite(max_cutoff) || min_cutoff >= max_cutoff ||
+        !std::isfinite(max_cutoff - min_cutoff))
+        throw std::invalid_argument("Invalid optimized landscape settings");
+    auto panels = search_seeds;
+    enable_landscape({}); // Extra searches are distinct from passive observation.
+    std::vector<DimerLandscapePoint> optimized_points;
+    auto refresh = [&]() {
+        for (auto& point : optimized_points)
+            for (const auto& panel : panels) {
+                const auto m = dimer_cutoff_metrics(panel, point.cutoff);
+                if (m.affected_primers < point.metrics.affected_primers) {
+                    point.solution = panel;
+                    point.metrics = m;
+                }
+            }
+    };
+    for (std::size_t run = 0; run < points; ++run) {
+        double cutoff;
+        std::string reason;
+        if (!adaptive) {
+            cutoff = min_cutoff + (max_cutoff - min_cutoff) * run / (points - 1);
+            reason = "evenly spaced cutoff grid";
+        } else if (run == 0) { cutoff = min_cutoff; reason = "lower range endpoint"; }
+        else if (run == 1) { cutoff = max_cutoff; reason = "upper range endpoint"; }
+        else if (run == 2 && selection_cutoff > min_cutoff && selection_cutoff < max_cutoff) {
+            cutoff = selection_cutoff; reason = "configured panel-selection cutoff";
+        }
+        else {
+            double priority = -1;
+            bool found = false;
+            for (std::size_t i = 1; i < optimized_points.size(); ++i) {
+                const auto& left = optimized_points[i-1];
+                const auto& right = optimized_points[i];
+                const double mid = left.cutoff + (right.cutoff - left.cutoff) / 2;
+                if (mid <= left.cutoff || mid >= right.cutoff) continue;
+                // Concentrate searches where count changes and the interval is wide.
+                const double score = (right.cutoff - left.cutoff) *
+                    (1.0 + right.metrics.affected_primers - left.metrics.affected_primers);
+                if (score > priority) {
+                    priority = score; cutoff = mid; found = true;
+                    std::ostringstream why;
+                    why << std::setprecision(10) << "midpoint of [" << left.cutoff << ", " << right.cutoff
+                        << "]; best-known endpoint affected counts " << left.metrics.affected_primers
+                        << " -> " << right.metrics.affected_primers << "; priority = "
+                        << right.cutoff-left.cutoff << " * (1 + "
+                        << right.metrics.affected_primers-left.metrics.affected_primers << ") = " << score
+                        << " (largest remaining interval priority)";
+                    reason = why.str();
+                }
+            }
+            if (!found) break; // No representable interior cutoff remains.
+        }
+        set_search_seeds(panels);
+        const unsigned run_seed = seed + static_cast<unsigned>(run);
+        std::srand(run_seed);
+        RunLogBlock cutoff_block("Cutoff " + std::to_string(cutoff) + " cal/mol");
+        std::ostringstream progress;
+        progress << std::setprecision(10) << "\nLandscape search " << run+1 << "/" << points
+                 << ": cutoff = " << cutoff << " cal/mol; seed = " << run_seed
+                 << "\n  Next cutoff reason: " << reason
+                 << "\n  Budget: " << restarts << " restarts x " << iterations << " proposals\n";
+        std::cout << progress.str();
+        weight_t objective;
+        const auto begin = std::chrono::steady_clock::now();
+        const double cooling = std::exp(std::log(1e-6) / iterations);
+        auto solution = solve_affected_primers_sa(restarts, iterations, 1, cooling, cutoff, objective);
+        const long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - begin).count();
+        const auto metrics = dimer_cutoff_metrics(solution, cutoff);
+        std::ostringstream result;
+        result << std::setprecision(10) << "Landscape result: cutoff = " << cutoff
+               << " cal/mol; affected primers = " << metrics.affected_primers << "/" << K
+               << " (" << std::fixed << std::setprecision(1) << 100.0*metrics.affected_primers/K
+               << "%); search time = " << ms << " ms\n";
+        std::cout << result.str();
+        cutoff_block.complete(std::to_string(metrics.affected_primers) + "/" + std::to_string(K) + " affected primers");
+        optimized_points.push_back({cutoff, solution, metrics, metrics.affected_primers, run_seed, ms});
+        if (std::find(panels.begin(), panels.end(), solution) == panels.end()) panels.push_back(solution);
+        refresh();
+        std::sort(optimized_points.begin(), optimized_points.end(),
+            [](const auto& a, const auto& b) { return a.cutoff < b.cutoff; });
+    }
+    set_search_seeds({});
+    landscape_points = std::move(optimized_points);
+}
+
 weight_t KPartiteGraph::rank_bottleneck_score(
     const std::vector<index_t>& solution, std::size_t allowed_bad) const {
     const std::size_t edge_count = K < 2 ? 0 : std::size_t(K) * (K - 1) / 2;
@@ -1111,6 +1315,111 @@ weight_t KPartiteGraph::dimer_sum_score(const std::vector<index_t>& solution) co
     return total;
 }
 
+std::size_t KPartiteGraph::count_below_cutoff(
+    const std::vector<index_t>& solution, weight_t cutoff) const {
+    std::size_t count = 0;
+    for (index_t p = 0; p < K; ++p)
+        for (index_t q = p + 1; q < K; ++q)
+            count += graph[index(p, solution[p])][index(q, solution[q])] < cutoff;
+    return count;
+}
+
+std::vector<index_t> KPartiteGraph::solve_cutoff_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, weight_t cutoff, weight_t& out_score) {
+    if (!std::isfinite(cutoff))
+        throw std::invalid_argument("dimer cutoff must be finite");
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling,
+                              0, out_score, false, cutoff);
+}
+
+DimerCutoffMetrics KPartiteGraph::dimer_cutoff_metrics(
+    const std::vector<index_t>& solution, weight_t cutoff) const {
+    if (K < 2 || K % 2 != 0 || solution.size() != K || !std::isfinite(cutoff))
+        throw std::invalid_argument("Dimer amplicon metrics require an even K and a finite cutoff");
+    for (index_t p = 0; p < K; ++p)
+        if (solution[p] >= (valid_N.empty() ? N : valid_N[p]))
+            throw std::invalid_argument("Dimer amplicon metrics contain an invalid candidate");
+    DimerCutoffMetrics metrics;
+    std::vector<bool> affected(K, false);
+    for (index_t p = 0; p < K; ++p) {
+        for (index_t q = p + 1; q < K; ++q) {
+            const auto dg = graph[index(p, solution[p])][index(q, solution[q])];
+            if (!std::isfinite(dg))
+                throw std::invalid_argument("Non-finite dimer edge");
+            if (dg >= cutoff) continue;
+            ++metrics.below_cutoff;
+            affected[p] = affected[q] = true;
+            metrics.severity += cutoff - dg;
+        }
+    }
+    metrics.affected_primers = std::count(affected.begin(), affected.end(), true);
+    for (index_t p = 0; p < K; p += 2)
+        metrics.affected_amplicons += affected[p] || affected[p + 1];
+    if (!std::isfinite(metrics.severity))
+        throw std::invalid_argument("Non-finite dimer severity");
+    return metrics;
+}
+
+std::vector<index_t> KPartiteGraph::solve_affected_amplicons_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, weight_t cutoff, weight_t& out_score) {
+    if (K % 2 != 0 || !std::isfinite(cutoff))
+        throw std::invalid_argument("Affected amplicon search requires an even K and a finite cutoff");
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling,
+                              0, out_score, false, cutoff, CutoffObjective::Amplicons);
+}
+
+std::vector<index_t> KPartiteGraph::solve_affected_primers_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, weight_t cutoff, weight_t& out_score) {
+    if (K % 2 != 0 || !std::isfinite(cutoff))
+        throw std::invalid_argument("Affected primer search requires an even K and a finite cutoff");
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling,
+                              0, out_score, false, cutoff, CutoffObjective::Primers);
+}
+
+std::vector<weight_t> KPartiteGraph::selected_primer_worst_dg(
+    const std::vector<index_t>& solution) const {
+    if (K < 2 || solution.size() != K)
+        throw std::invalid_argument("Primer dimer minima require K >= 2 and a solution of size K");
+    for (index_t p = 0; p < K; ++p)
+        if (solution[p] >= (valid_N.empty() ? N : valid_N[p]))
+            throw std::invalid_argument("Primer dimer minima contain an invalid candidate");
+    std::vector<weight_t> minima(K, std::numeric_limits<weight_t>::max());
+    for (index_t p = 0; p < K; ++p) {
+        for (index_t q = p + 1; q < K; ++q) {
+            const auto dg = graph[index(p, solution[p])][index(q, solution[q])];
+            if (!std::isfinite(dg)) throw std::invalid_argument("Non-finite primer dimer edge");
+            minima[p] = std::min(minima[p], dg);
+            minima[q] = std::min(minima[q], dg);
+        }
+    }
+    return minima;
+}
+
+weight_t KPartiteGraph::primer_fraction_bound_score(
+    const std::vector<index_t>& solution, std::size_t allowed_primers) const {
+    if (allowed_primers >= K)
+        throw std::invalid_argument("Primer allowance must be smaller than K");
+    auto minima = selected_primer_worst_dg(solution);
+    // A primer is affected at c iff its minimum incident dG is strictly < c.
+    // Therefore minima[k] is the largest cutoff allowing at most k primers,
+    // including repeated minima when both endpoints share the worst edge.
+    std::nth_element(minima.begin(), minima.begin() + allowed_primers, minima.end());
+    return minima[allowed_primers];
+}
+
+std::vector<index_t> KPartiteGraph::solve_primer_fraction_bound_sa(
+    std::size_t restarts, std::size_t max_iter, double init_temp,
+    double cooling, std::size_t allowed_primers, weight_t& out_bound) {
+    if (K % 2 != 0 || allowed_primers >= K)
+        throw std::invalid_argument("Primer fraction-bound search requires an even K and allowance < K");
+    return solve_objective_sa(restarts, max_iter, init_temp, cooling,
+                              allowed_primers, out_bound, false, std::nullopt,
+                              CutoffObjective::PrimerBound);
+}
+
 std::vector<index_t> KPartiteGraph::solve_sum_sa(
     std::size_t restarts, std::size_t max_iter, double init_temp,
     double cooling, weight_t& out_score) {
@@ -1126,10 +1435,13 @@ std::vector<index_t> KPartiteGraph::solve_rank_bottleneck_sa(
 
 std::vector<index_t> KPartiteGraph::solve_objective_sa(
     std::size_t restarts, std::size_t max_iter, double init_temp,
-    double cooling, std::size_t allowed_bad, weight_t& out_threshold, bool sum) {
+    double cooling, std::size_t allowed_bad, weight_t& out_threshold, bool sum,
+    std::optional<weight_t> cutoff, CutoffObjective cutoff_objective) {
     const std::size_t edge_count = K < 2 ? 0 : std::size_t(K) * (K - 1) / 2;
-    if (edge_count == 0 || allowed_bad >= edge_count)
-        throw std::invalid_argument("rank bottleneck requires K >= 2 and allowed_bad < K*(K-1)/2");
+    const auto allowance_limit = cutoff_objective == CutoffObjective::PrimerBound
+        ? std::size_t(K) : edge_count;
+    if (edge_count == 0 || allowed_bad >= allowance_limit)
+        throw std::invalid_argument("SA objective requires K >= 2 and allowance below its objective limit");
     if (restarts == 0 || !std::isfinite(init_temp) || init_temp <= 0 ||
         !std::isfinite(cooling) || cooling <= 0 || cooling > 1)
         throw std::invalid_argument("invalid rank bottleneck SA parameters");
@@ -1139,7 +1451,7 @@ std::vector<index_t> KPartiteGraph::solve_objective_sa(
         if (valid_N[p] == 0)
             throw std::invalid_argument("rank bottleneck partition has no valid candidates");
     return bottleneck_search_sa(restarts, max_iter, init_temp, cooling,
-                                out_threshold, allowed_bad, sum);
+                                out_threshold, allowed_bad, sum, cutoff, cutoff_objective);
 }
 
 std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
@@ -1147,12 +1459,25 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
                                                           double      init_temp,
                                                           double      cooling,
                                                           weight_t&   out_threshold,
-                                                          std::size_t allowed_bad, bool sum) {
-    auto score = [&](const std::vector<index_t>& solution) {
-        if (sum) return dimer_sum_score(solution);
-        if (allowed_bad > 0) return rank_bottleneck_score(solution, allowed_bad);
+                                                          std::size_t allowed_bad, bool sum,
+                                                          std::optional<weight_t> cutoff,
+                                                          CutoffObjective cutoff_objective) {
+    using Objective = std::array<weight_t, 3>;
+    auto score = [&](const std::vector<index_t>& solution) -> Objective {
+        if (cutoff_objective == CutoffObjective::PrimerBound)
+            return {primer_fraction_bound_score(solution, allowed_bad), 0, 0};
+        if (cutoff_objective != CutoffObjective::Pairs) {
+            const auto metrics = dimer_cutoff_metrics(solution, *cutoff);
+            if (cutoff_objective == CutoffObjective::Primers)
+                return {-static_cast<weight_t>(metrics.affected_primers),
+                        0, 0};
+            return {-static_cast<weight_t>(metrics.affected_amplicons), -metrics.severity, 0};
+        }
+        if (cutoff) return {-static_cast<weight_t>(count_below_cutoff(solution, *cutoff)), 0, 0};
+        if (sum) return {dimer_sum_score(solution), 0, 0};
+        if (allowed_bad > 0) return {rank_bottleneck_score(solution, allowed_bad), 0, 0};
         index_t ignored = 0;
-        return full_bottleneck(solution, ignored);
+        return {full_bottleneck(solution, ignored), 0, 0};
     };
     for (index_t p = 0; p < K; ++p) {
         if (valid_N[p] == 0) {
@@ -1164,12 +1489,28 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
 
     std::vector<index_t> best_solution(K, 0);
     out_threshold = std::numeric_limits<weight_t>::lowest();
+    Objective best_cost{out_threshold, out_threshold, out_threshold};
+    for (const auto& seed : search_seeds) {
+        const auto value = score(seed);
+        observe_panel(seed);
+        if (value > best_cost) {
+            best_cost = value;
+            best_solution = seed;
+            out_threshold = value[0];
+        }
+    }
 
     const int TW = 10 + 15 + 15 + 10 + 12;
     std::cout << "\nSA Search  (K=" << K << ", N=" << N
-              << ", objective=" << (sum ? "sum" : "rank")
-              << ", allowed_bad=" << allowed_bad
-              << ", restarts=" << restarts
+              << ", objective=" << (cutoff_objective == CutoffObjective::PrimerBound ? "primer-fraction-bound"
+                  : cutoff_objective == CutoffObjective::Primers ? "min-affected-primers"
+                  : cutoff_objective == CutoffObjective::Amplicons ? "min-affected-amplicons"
+                  : cutoff ? "min-below-cutoff" : sum ? "sum" : "rank")
+              << (cutoff_objective == CutoffObjective::PrimerBound ? ", allowed_primers=" : ", allowed_bad=")
+              << allowed_bad
+              << (cutoff ? ", cutoff_cal_per_mol=" : "");
+    if (cutoff) std::cout << *cutoff;
+    std::cout << ", restarts=" << restarts
               << ", max_iter=" << max_iter
               << ", init_temp=" << init_temp
               << ", cooling=" << cooling << ")\n"
@@ -1185,19 +1526,23 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
 
     for (std::size_t r = 0; r < restarts; ++r) {
         std::vector<index_t> solution(K);
-        for (index_t p = 0; p < K; ++p)
-            solution[p] = random_between(0, valid_N[p] - 1);
+        if (r < search_seeds.size()) solution = search_seeds[r];
+        else {
+            for (index_t p = 0; p < K; ++p)
+                solution[p] = random_between(0, valid_N[p] - 1);
 
-        for (std::size_t group = 0; group < pair_choices.size(); ++group)
-            if (!pair_choices[group].empty()) {
-                const auto choice = pair_choices[group][random_between(0, pair_choices[group].size()-1)];
-                solution[2*group] = choice.first;
-                solution[2*group+1] = choice.second;
-            }
-        weight_t current = score(solution);
+            for (std::size_t group = 0; group < pair_choices.size(); ++group)
+                if (!pair_choices[group].empty()) {
+                    const auto choice = pair_choices[group][random_between(0, pair_choices[group].size()-1)];
+                    solution[2*group] = choice.first;
+                    solution[2*group+1] = choice.second;
+                }
+        }
+        observe_panel(solution);
+        Objective current = score(solution);
 
         std::vector<index_t> local_best     = solution;
-        weight_t             local_best_cost = current;
+        Objective            local_best_cost = current;
 
         double temp = init_temp;
 
@@ -1221,13 +1566,23 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
             const index_t old_n = solution[p], old_other = solution[other];
             solution[p] = n;
             if (other != p) solution[other] = other_n;
-            weight_t candidate = score(solution);
+            Objective candidate = score(solution);
             solution[p] = old_n;
             if (other != p) solution[other] = old_other;
-            double   delta     = candidate - current;
+            // Use the first changed priority for annealing acceptance.
+            // Counts use integer units; severity differences use kcal/mol.
+            double delta = 0;
+            for (std::size_t priority = 0; priority < candidate.size(); ++priority) {
+                if (candidate[priority] == current[priority]) continue;
+                delta = candidate[priority] - current[priority];
+                if ((cutoff_objective == CutoffObjective::Amplicons && priority == 1) ||
+                    (cutoff_objective == CutoffObjective::Primers && priority == 2))
+                    delta /= 1000.0;
+                break;
+            }
 
             // Accept if better, or with probability exp(delta/temp) if worse
-            bool accept = delta > 0 ||
+            bool accept = candidate > current ||
                           ((double)rand() / RAND_MAX) < std::exp(delta / temp);
 
             if (accept) {
@@ -1238,22 +1593,24 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
                 if (current > local_best_cost) {
                     local_best_cost = current;
                     local_best      = solution;
-                }
+                    observe_panel(solution);
+                } else if (adaptive_landscape) observe_panel(solution);
             }
 
             temp *= cooling;
             if (temp < 1e-6) break;  // frozen
         }
 
-        bool improved = local_best_cost > out_threshold;
+        bool improved = local_best_cost > best_cost;
         if (improved) {
-            out_threshold = local_best_cost;
+            best_cost = local_best_cost;
+            out_threshold = best_cost[0];
             best_solution = local_best;
         }
         if (improved || r % 100 == 0) {
         std::cout << std::right << std::fixed << std::setprecision(4)
                   << std::setw(10) << r
-                  << std::setw(15) << local_best_cost
+                  << std::setw(15) << local_best_cost[0]
                   << std::setw(15) << out_threshold
                   << std::setw(10) << iter
                   << std::setw(12) << std::scientific << std::setprecision(2) << temp
@@ -1263,8 +1620,17 @@ std::vector<index_t> KPartiteGraph::bottleneck_search_sa(std::size_t restarts,
     }
 
     std::cout << std::string(TW, '-') << "\n"
-              << "Best bottleneck: " << std::fixed << std::setprecision(4)
+              << (cutoff_objective == CutoffObjective::PrimerBound ? "Best primer bound: "
+                  : cutoff_objective != CutoffObjective::Pairs ? "Best affected objective: " : "Best bottleneck: ")
+              << std::fixed << std::setprecision(4)
               << out_threshold << "\n";
+    if (cutoff_objective != CutoffObjective::Pairs) {
+        const auto metrics = dimer_cutoff_metrics(best_solution,
+            cutoff_objective == CutoffObjective::PrimerBound ? out_threshold : *cutoff);
+        std::cout << "Affected primers: " << metrics.affected_primers << " / " << K
+                  << "; affected amplicons: " << metrics.affected_amplicons << " / " << K / 2
+                  << "; severity: " << metrics.severity << " cal/mol\n";
+    }
 
     return best_solution;
 }

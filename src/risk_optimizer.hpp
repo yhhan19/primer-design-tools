@@ -66,11 +66,11 @@ class RiskOptimizer {
         std::vector<std::pair<index_t, risk_t>> *solution_vector;
         std::vector<index_t> left_valid_results;
         std::vector<index_t> right_valid_results;
+        std::vector<std::vector<std::size_t>> left_starts_by_pdr;
+        std::vector<std::vector<std::size_t>> right_ends_by_pdr;
         index_t left_min_candidates = 1;
         index_t right_min_candidates = 1;
         BST **solutions;
-        risk_t *memo;
-        key_t *prev;
         index_t size, len, min, max, fumax, rumax;
         risk_t *risk, *prefix_sum;
         Args args;
@@ -81,6 +81,7 @@ class RiskOptimizer {
         risk_t cost(index_t p, risk_t u, risk_t alpha);
         bool left_valid(index_t p) const;
         bool right_valid(index_t p) const;
+        bool has_in_range_pair(index_t left_pdr, index_t right_pdr) const;
         risk_t top_k_opt(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha);
         risk_t opt_m(index_t f, index_t r, risk_t u, risk_t alpha);

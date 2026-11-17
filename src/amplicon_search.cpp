@@ -6,7 +6,8 @@ std::vector<AmpliconHit> Automaton::search_chunk_amplicons(const Task& chunk,
     const std::vector<AmpliconPrimerPair>& pairs, std::size_t owned_length,
     std::size_t threshold, double dg_cutoff, std::size_t amp_min, std::size_t amp_max) {
     std::vector<Result> hits;
-    search_chunk(chunk.contig, chunk.seq.data(), chunk.seq.size(), 0, threshold, dg_cutoff, hits);
+    search_chunk(chunk.contig, chunk.seq.data(), chunk.seq.size(), chunk.seq.size(),
+                 0, threshold, dg_cutoff, hits);
     // Single-hit search returns positions local to this chunk. Pair locally,
     // then translate both binding sites and the product to global coordinates.
     std::unordered_map<std::string, std::array<std::vector<const Result*>,2>> by_label;
@@ -54,6 +55,15 @@ std::vector<AmpliconHit> Automaton::search_amplicons(const std::string& path,
     const std::vector<AmpliconPrimerPair>& pairs, std::size_t threshold,
     double dg_cutoff, std::size_t amp_min, std::size_t amp_max,
     std::size_t chunk_size, std::size_t io_block_size, std::size_t nthreads) {
+    Automaton search_index(labels, sequences, k, threshold);
+    return search_index.process_amplicons(path, pairs, threshold, dg_cutoff, amp_min,
+                                          amp_max, chunk_size, io_block_size, nthreads);
+}
+
+std::vector<AmpliconHit> Automaton::process_amplicons(const std::string& path,
+    const std::vector<AmpliconPrimerPair>& pairs, std::size_t threshold,
+    double dg_cutoff, std::size_t amp_min, std::size_t amp_max,
+    std::size_t chunk_size, std::size_t io_block_size, std::size_t nthreads) {
     if(!amp_min || amp_min>amp_max || !chunk_size || !io_block_size || !nthreads ||
        nthreads>std::numeric_limits<std::size_t>::max()/2 || !std::isfinite(dg_cutoff))
         throw std::invalid_argument("Invalid paired off-target search settings");
@@ -85,7 +95,8 @@ std::vector<AmpliconHit> Automaton::search_amplicons(const std::string& path,
                 if(failed) continue;
                 try {
                     auto products=search_chunk_amplicons(job,pairs,
-                        std::min(chunk_size,job.seq.size()),threshold,dg_cutoff,amp_min,amp_max);
+                        job.is_last ? job.seq.size() : chunk_size,
+                        threshold,dg_cutoff,amp_min,amp_max);
                     auto& bucket=buckets[t];
                     bucket.insert(bucket.end(),std::make_move_iterator(products.begin()),std::make_move_iterator(products.end()));
                     ++processed;

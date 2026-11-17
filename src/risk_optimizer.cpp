@@ -1,4 +1,5 @@
 #include "risk_optimizer.hpp"
+#include "pdr_layout.hpp"
 
 RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels, 
                              std::vector<std::string> &data,
@@ -24,8 +25,6 @@ RiskOptimizer::RiskOptimizer(std::vector<std::string> &labels,
     this->max = max;
     this->fumax = fumax;
     this->rumax = rumax;
-    memo = new risk_t[KEY_LIMIT];
-    prev = new key_t[KEY_LIMIT];
     solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
     solutions = new BST*[size];
     build_primer3_candidate_counts();
@@ -46,8 +45,6 @@ RiskOptimizer::RiskOptimizer(std::vector<risk_t> input,
     this->len = len;
     this->min = min;
     this->max = max;
-    memo = new risk_t[KEY_LIMIT];
-    prev = new key_t[KEY_LIMIT];
     solution_vector = new std::vector<std::pair<index_t, risk_t>>[size];
     solutions = new BST*[size];
 }
@@ -118,8 +115,15 @@ void RiskOptimizer::build_primer3_candidate_counts() {
     const std::size_t num_pdrs = tmpl.size() - len + 1;
     std::vector<long long> left_diff(num_pdrs + 1, 0);
     std::vector<long long> right_diff(num_pdrs + 1, 0);
+    const bool midpoint = args.pdr_search == "midpoint";
+    if (midpoint) {
+        left_starts_by_pdr.resize(num_pdrs);
+        right_ends_by_pdr.resize(num_pdrs);
+    }
 
     auto add_to_containing_pdrs = [&](std::vector<long long>& diff,
+                                      std::vector<std::vector<std::size_t>>& endpoints,
+                                      std::size_t endpoint,
                                       std::size_t primer_start,
                                       std::size_t primer_end) {
         if (primer_end <= primer_start || primer_end - primer_start > len) return;
@@ -128,13 +132,17 @@ void RiskOptimizer::build_primer3_candidate_counts() {
         if (first > last) return;
         ++diff[first];
         --diff[last + 1];
+        if (midpoint)
+            for (std::size_t p = first; p <= last; ++p)
+                endpoints[p].push_back(endpoint);
     };
 
     for (int i = 0; i < retval->fwd.num_elem; ++i) {
         const primer_rec& primer = retval->fwd.oligo[i];
         if (primer.start < 0 || primer.length <= 0) continue;
         const std::size_t start = static_cast<std::size_t>(primer.start);
-        add_to_containing_pdrs(left_diff, start, start + primer.length);
+        add_to_containing_pdrs(left_diff, left_starts_by_pdr, start,
+                               start, start + primer.length);
     }
     for (int i = 0; i < retval->rev.num_elem; ++i) {
         const primer_rec& primer = retval->rev.oligo[i];
@@ -142,8 +150,15 @@ void RiskOptimizer::build_primer3_candidate_counts() {
             primer.start - primer.length + 1 < 0) continue;
         const std::size_t start = static_cast<std::size_t>(
             primer.start - primer.length + 1);
-        add_to_containing_pdrs(right_diff, start, start + primer.length);
+        const auto end = start + primer.length;
+        add_to_containing_pdrs(right_diff, right_ends_by_pdr, end, start, end);
     }
+
+    for (auto* by_pdr : {&left_starts_by_pdr, &right_ends_by_pdr})
+        for (auto& endpoints : *by_pdr) {
+            std::sort(endpoints.begin(), endpoints.end());
+            endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+        }
 
     left_valid_results.resize(num_pdrs);
     right_valid_results.resize(num_pdrs);
@@ -219,13 +234,21 @@ bool RiskOptimizer::right_valid(index_t p) const {
            right_valid_results[p] >= right_min_candidates;
 }
 
+bool RiskOptimizer::has_in_range_pair(index_t left_pdr, index_t right_pdr) const {
+    if (args.pdr_search != "midpoint") return true;
+    const auto& ends = right_ends_by_pdr[right_pdr];
+    auto end = ends.begin();
+    for (const auto start : left_starts_by_pdr[left_pdr]) {
+        end = std::lower_bound(end, ends.end(), start + args.len_amp_min);
+        if (end == ends.end()) return false;
+        if (*end - start <= args.len_amp) return true;
+    }
+    return false;
+}
+
 RiskOptimizer::~RiskOptimizer() {
     delete [] risk;
     delete [] prefix_sum;
-    if (max == min) {
-        delete [] memo;
-        delete [] prev;
-    }
     delete [] solutions;
     delete [] solution_vector;
 }
@@ -307,6 +330,23 @@ index_t RiskOptimizer::greedy_random_between(index_t cmin, index_t cmax) {
 }
 
 void RiskOptimizer::validate_PDR(std::vector<index_t> PDR) {
+    if (args.pdr_search == "midpoint") {
+        if (PDR.empty() || PDR.size() % 2) throw std::runtime_error("Invalid PDR chain size");
+        std::vector<PDRLayoutWindow> windows;
+        for (std::size_t i = 0; i < PDR.size(); i += 2) {
+            windows.push_back({PDR[i], std::int64_t(PDR[i]) + len,
+                               PDR[i+1], std::int64_t(PDR[i+1]) + len});
+            const auto length = std::int64_t(PDR[i+1]) + len - PDR[i];
+            if (length < min || length > max || !left_valid(PDR[i]) ||
+                !right_valid(PDR[i+1]) || !has_in_range_pair(PDR[i], PDR[i+1]))
+                throw std::runtime_error("PDR length/Primer3 feasibility constraint");
+        }
+        const auto error = pdr_layout_error(windows, size, fumax, rumax);
+        if (!error.empty()) throw std::runtime_error("Invalid midpoint layout: " + error);
+        std::cout << "PDRs: " << PDR.size() << "\nuncovered: " << PDR.front()
+                  << " (front), " << size - PDR.back() - len << " (rear)\n";
+        return;
+    }
     for (index_t i = 0; i < PDR.size(); i ++) {
         const bool has_candidates =
             (i % 2 == 0) ? left_valid(PDR[i]) : right_valid(PDR[i]);
@@ -331,7 +371,7 @@ void RiskOptimizer::validate_PDR(std::vector<index_t> PDR) {
         }
         else {
             if (i == PDR.size() - 1) {
-                assert(PDR[i] - PDR[i - 2] >= len);
+                if (i >= 2) assert(PDR[i] - PDR[i - 2] >= len);
             }
             else {
                 assert(PDR[i] - PDR[i + 1] >= len);
@@ -426,6 +466,7 @@ risk_t RiskOptimizer::top_k_opt(risk_t u, std::vector<index_t> &min_PDR, risk_t 
 
 risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha) {
     min_PDR.clear();
+    prev_umap.clear();
     for (index_t i = 0; i < size; i ++) 
         solution_vector[i].clear();
     risk_t all_min_risk = INF;
@@ -437,10 +478,11 @@ risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, ri
             index_t f_ = r_ - max;
             if (r < r_ + len || r_ < f + len || f < f_ + len) continue;
             if (!right_valid(r) || !right_valid(r_) ||
-                !left_valid(f) || !left_valid(f_)) continue;
+                !left_valid(f) || !left_valid(f_) ||
+                !has_in_range_pair(f, r) || !has_in_range_pair(f_, r_)) continue;
             key_t k = to_key_2(r, r_);
             risk_t min_risk;
-            key_t min_key;
+            key_t min_key = 0;
             if (f_ <= fumax) {
                 min_risk = cost(f, u, alpha) + cost(r, u, alpha) + cost(f_, u, alpha) + cost(r_, u, alpha);
                 min_key = 0;
@@ -472,7 +514,7 @@ risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, ri
                 min_risk += cost(f, u, alpha) + cost(r, u, alpha);
             }
             solution_vector[r].push_back(std::make_pair(r_, min_risk));
-            prev[k] = min_key;
+            prev_umap[k] = min_key;
             if (r >= size - rumax) {
                 if (min_risk < all_min_risk) {
                     all_min_risk = min_risk;
@@ -491,7 +533,7 @@ risk_t RiskOptimizer::top_k_opt_fast(risk_t u, std::vector<index_t> &min_PDR, ri
         c = d - max;
         min_PDR.push_back(b);
         min_PDR.push_back(a);
-        min_key = prev[min_key];
+        min_key = prev_umap.at(min_key);
         if (min_key == 0) {
             min_PDR.push_back(d);
             min_PDR.push_back(c);
@@ -562,12 +604,14 @@ risk_t RiskOptimizer::top_k_opt_m(risk_t u, std::vector<index_t> &min_PDR, risk_
 
 risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk_t alpha) {
     min_PDR.clear();
+    memo_umap.clear();
+    prev_umap.clear();
     risk_t all_min_risk = INF;
     key_t all_min_key = 0;
     for (index_t r = max; r <= size - len; r ++) {
         for (index_t f = (r >= max ? r - max : 0); r >= f + min; f ++) {
             risk_t min_risk = INF;
-            key_t min_key, k = to_key_2(r, f);
+            key_t min_key = 0, k = to_key_2(r, f);
             if (f <= len * 2) {
                 min_risk = min_key = 0;
             }
@@ -578,7 +622,8 @@ risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk
                     index_t f_max = std::min((r_ >= min ? r_ - min : 0), (2 * f >= len + r_? 2 * f - len - r_ : 0));
                     for (index_t f_ = f_min; f_ <= f_max; f_ ++) {
                         key_t k_ = to_key_2(r_, f_);
-                        risk_t temp = memo[k_];
+                        const auto previous = memo_umap.find(k_);
+                        risk_t temp = previous == memo_umap.end() ? INF : previous->second;
                         if (temp < min_risk) {
                             min_risk = temp;
                             min_key = k_;
@@ -587,8 +632,8 @@ risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk
                 }
             }
             min_risk += cost(f, u, alpha) + cost(r, u, alpha);
-            memo[k] = min_risk;
-            prev[k] = min_key;
+            memo_umap[k] = min_risk;
+            prev_umap[k] = min_key;
             if (r >= size - len * 3) {
                 if (min_risk < all_min_risk) {
                     all_min_risk = min_risk;
@@ -604,7 +649,7 @@ risk_t RiskOptimizer::top_k_opt_mi(risk_t u, std::vector<index_t> &min_PDR, risk
         to_index_2(min_key, b, a);
         min_PDR.push_back(b);
         min_PDR.push_back(a);
-        min_key = prev[min_key];
+        min_key = prev_umap.at(min_key);
     }
     std::reverse(min_PDR.begin(), min_PDR.end());
     return min_risk;
@@ -614,6 +659,7 @@ risk_t RiskOptimizer::top_k_opt_mi_fast(risk_t u,
                                     std::vector<index_t>& min_PDR,
                                     risk_t alpha) {
     min_PDR.clear();
+    prev_umap.clear();
 
     const index_t r_first = max;
     const index_t r_last = size >= len ? size - len : 0;
@@ -634,7 +680,7 @@ risk_t RiskOptimizer::top_k_opt_mi_fast(risk_t u,
         const index_t f_last = r - min;
 
         for (index_t f = f_first; f <= f_last; ++f) {
-            if (!right_valid(r) || !left_valid(f)) continue;
+            if (!right_valid(r) || !left_valid(f) || !has_in_range_pair(f, r)) continue;
 
             risk_t min_risk = INF;
             key_t  min_key  = 0;
@@ -659,8 +705,7 @@ risk_t RiskOptimizer::top_k_opt_mi_fast(risk_t u,
 
             if (min_risk >= INF) continue;
             min_risk += cost(f, u, alpha) + cost(r, u, alpha);
-            memo[k]   = min_risk;
-            prev[k]   = min_key;
+            prev_umap[k] = min_key;
 
             midpoint_rmq_->insert(r, r + f, min_risk, k);
 
@@ -680,7 +725,7 @@ risk_t RiskOptimizer::top_k_opt_mi_fast(risk_t u,
         to_index_2(min_key, b, a);
         min_PDR.push_back(b);
         min_PDR.push_back(a);
-        min_key = prev[min_key];
+        min_key = prev_umap.at(min_key);
     }
     std::reverse(min_PDR.begin(), min_PDR.end());
     return all_min_risk;

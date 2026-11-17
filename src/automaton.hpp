@@ -63,19 +63,26 @@ public:
                                std::size_t io_block_size, 
                                std::size_t nthreads);
 
-    // Paired binding is evaluated within one overlapped chunk. The original
-    // single-hit search entry point and implementation are unchanged.
+    // Paired binding is evaluated within one overlapped chunk.
     std::vector<AmpliconHit> search_amplicons(const std::string& path,
         const std::vector<AmpliconPrimerPair>& pairs, std::size_t threshold,
         double dg_cutoff, std::size_t amp_min, std::size_t amp_max,
         std::size_t chunk_size, std::size_t io_block_size, std::size_t nthreads);
 private:
+    Automaton(const std::vector<std::string>& labels,
+              const std::vector<std::string>& seqs, std::size_t k,
+              std::size_t threshold);
+    std::vector<AmpliconHit> process_amplicons(const std::string& path,
+        const std::vector<AmpliconPrimerPair>& pairs, std::size_t threshold,
+        double dg_cutoff, std::size_t amp_min, std::size_t amp_max,
+        std::size_t chunk_size, std::size_t io_block_size, std::size_t nthreads);
     std::vector<AmpliconHit> search_chunk_amplicons(const Task& chunk,
         const std::vector<AmpliconPrimerPair>& pairs, std::size_t owned_length,
         std::size_t threshold, double dg_cutoff, std::size_t amp_min, std::size_t amp_max);
     std::size_t search_chunk(const std::string& contig,
                              const char* data,
                              std::size_t len,
+                             std::size_t owned_length,
                              std::size_t index,
                              std::size_t threshold,
                              double dg_thres,
@@ -88,7 +95,8 @@ private:
                                              std::size_t io_block_size,
                                              std::size_t nthreads);
 private:
-    AutomatonNode *root;
+    AutomatonNode *root = nullptr;
+    std::vector<std::string> labels, sequences;
     std::vector<std::string> index2label, index2data;
     std::vector<std::size_t> index2pos, index2strand;
     std::unordered_map<std::string, std::size_t> label2index;

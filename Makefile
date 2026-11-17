@@ -1,4 +1,5 @@
 CXX      := g++
+.DEFAULT_GOAL := all
 PRIMER3  ?= ./primer3
 
 CXXFLAGS := -O3 -std=c++17 -I$(PRIMER3)/src -pthread \
@@ -31,6 +32,13 @@ BUILD_DIR := build
 SRC_DIR   := src
 
 TARGET := $(BIN_DIR)/dpro
+
+# Persistent energies must not survive a change to the scoring implementation
+# or the actual linked libthal object. shasum is the macOS fallback.
+DIMER_ENGINE_INPUTS := src/thal.cpp src/thal.hpp $(PRIMER3)/src/thal_primer.o
+DIMER_ENGINE_ID := $(shell cat $(DIMER_ENGINE_INPUTS) | (sha256sum 2>/dev/null || shasum -a 256) | cut -d ' ' -f1)
+$(BUILD_DIR)/thal.o: CXXFLAGS += -DDPRO_DIMER_ENGINE_ID=\"$(DIMER_ENGINE_ID)\"
+$(BUILD_DIR)/thal.o: $(DIMER_ENGINE_INPUTS) Makefile
 
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)

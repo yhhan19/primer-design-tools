@@ -48,7 +48,6 @@ extern "C" {
 
 #define ALPHA       0.1
 #define INF         1e18
-#define KEY_LIMIT   (1 << 26)
 
 #define ALPHABET_SIZE 128
 #define KELVIN_ZERO   -273.15
@@ -57,6 +56,16 @@ extern "C" {
 #define PRIMER3_PATH "./primer3"
 #endif
 
+struct DimerPartner {
+    std::string primer_name;
+    double dg;
+};
+
+struct PrimerDimerRisk {
+    std::optional<double> cutoff;
+    std::vector<DimerPartner> partners;
+};
+
 struct Oligo {
     std::string seq;
     int start;
@@ -64,13 +73,7 @@ struct Oligo {
     double tm;
     double gc;
 
-    // Variant-aware features
-    double mismatch_rate          = 0.0;
-    double genome_mismatch_rate   = 0.0;
-    double mismatch_3prime_rate   = 0.0;
-    double weighted_mismatch      = 0.0;
-    double mean_binding_ddg       = std::numeric_limits<double>::quiet_NaN();
-    double coverage_rate          = 0.0;
+    PrimerDimerRisk dimer_risk;
 };
 
 struct PairMsaMetrics {
@@ -113,6 +116,8 @@ struct Result {
 };
 
 struct Args {
+    std::string log_file;
+    std::string console_mode = "auto";
     // std::string mode;
 
     std::string input_file;
@@ -131,6 +136,7 @@ struct Args {
     double      u_min       = 0.1;
 
     std::size_t iter        = 1000;
+    std::size_t dimer_restarts = 400;
     std::size_t seed        = 42;
 
     std::string off_target_mode = "paired";
@@ -151,7 +157,6 @@ struct Args {
     double      p3_min_gc   = 40.0;
     double      p3_max_gc   = 60.0;
     std::size_t num_return  = 5;
-    std::size_t p3_weighted_keep_percent = 20;
     double pair_keep_percent = 20.0;
     std::size_t pair_min_return = 5;
     std::size_t pair_max_mismatches = 2;
@@ -166,13 +171,28 @@ struct Args {
     double      dg_thres    = -15000;
     double      temp        = 37.0;
     // Dimer window defaults to 58-62 C, independently of non-dimer temp.
-    std::string dimer_methods = "sum,min-max,top-k-bound";
-    std::string dimer_select;  // Empty prefers top-k-bound when listed, otherwise the first method.
+    static constexpr double default_dimer_dg_cutoff = -3000.0;  // cal/mol
+    std::string dimer_methods = "min-affected-primers";
+    bool expand_affected_pdrs = true;
+    std::size_t pdr_expansion_bases = 20;
+    std::size_t dimer_rounds = 1;
+    std::size_t dimer_landscape_points = 0;
+    bool dimer_landscape_adaptive = false;
+    bool landscape_only = false;
+    std::size_t dimer_landscape_restarts = 200;
+    std::size_t dimer_landscape_iterations = 1000;
+    double dimer_landscape_min = -5000;
+    double dimer_landscape_max = -2000;
+    std::string dimer_start_prefix;
+    std::string dimer_cache = "auto";
+    std::string dimer_select;  // Empty selects the first listed method.
+    std::optional<double> dimer_dg_cutoff;  // cal/mol
     double dimer_bad_percent = 1.0;  // Percentage of selected pool edges allowed below the rank threshold.
     std::optional<double> dimer_temp_min = 58.0;
     std::optional<double> dimer_temp_max = 62.0;
 
     bool        help        = false;
+    bool help_all = false;
 };
 
 struct SegmentContext {
@@ -180,6 +200,7 @@ struct SegmentContext {
     std::vector<std::string>  labels, sequences;
     std::string               tmpl;
     std::vector<index_t>      pdr_regions;
+    std::vector<std::size_t> pdr_region_lengths;
     std::vector<PrimerOutput> candidate_primers, filtered_primers;
     std::vector<Result>       off_target_hits;
 };
@@ -197,6 +218,7 @@ struct PipelineContext {
 
     // global
     std::vector<index_t>      dimer_solution;
+    std::vector<std::size_t> pdr_region_lengths; // Optional per-window generation lengths.
     std::vector<PrimerResult> solution_primers;
 
     void load_segment(std::size_t i) {
@@ -206,6 +228,7 @@ struct PipelineContext {
         labels            = seg.labels;
         sequences         = seg.sequences;
         pdr_regions       = seg.pdr_regions;
+        pdr_region_lengths = seg.pdr_region_lengths;
         candidate_primers = seg.candidate_primers;
         filtered_primers  = seg.filtered_primers;
         off_target_hits   = seg.off_target_hits;
@@ -217,6 +240,7 @@ struct PipelineContext {
         seg.labels            = labels;
         seg.sequences         = sequences;
         seg.pdr_regions       = pdr_regions;
+        seg.pdr_region_lengths = pdr_region_lengths;
         seg.candidate_primers = candidate_primers;
         seg.filtered_primers  = filtered_primers;
         seg.off_target_hits   = off_target_hits;
@@ -288,18 +312,16 @@ Oligo extract_oligo(const primer_rec& p,
                     const char* sequence,
                     bool is_right);
 
-void score_primer_variants(
-    Oligo& oligo,
-    const std::vector<std::string>& sequences,
-    bool is_right
-);
-
 PrimerOutput extract_all(const p3retval* retval,
                          const seq_args*  sa);
 
 void print_solution(const std::vector<PrimerResult>& solution);
 
 void save_solution(std::vector<SegmentContext>& seg, std::vector<PrimerResult>& solution, const std::string& filename);
+void annotate_solution_dimers(const std::vector<SegmentContext>& segments,
+                              std::vector<PrimerResult>& solution,
+                              double cutoff, double min_c, double max_c,
+                              const std::string& output_prefix);
 
 void save_coverage_report(const std::vector<SegmentContext>& segments,
                           const std::vector<PrimerResult>& solution,
@@ -308,7 +330,6 @@ void save_coverage_report(const std::vector<SegmentContext>& segments,
 bool same_oligo(const Oligo& a, const Oligo& b);
 struct PairingStats {
     std::size_t combinations = 0;
-    std::size_t checked = 0;
     std::size_t accepted = 0;
 };
 PairingStats build_candidate_pairs(PrimerOutput& output, const std::string& target, const Args& args);

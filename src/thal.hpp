@@ -1,5 +1,6 @@
 #pragma once
 #include "utility.hpp"
+#include "dimer_cache.hpp"
 #include <string>
 #include <unordered_map>
 #include <stdexcept>
@@ -86,7 +87,11 @@ public:
     }
 
     static void validate_dimer_range(double min_c, double max_c);
+    static void configure_dimer_cache(const std::string& directory);
+    static void flush_dimer_cache();
+    static DimerInteractionCache::Stats dimer_cache_stats();
     // Exact endpoint minimum for the fixed structure returned by libthal.
+    // Both inputs are physical oligo sequences in 5'->3' order.
     static double compute_dimer_worst_dg(const std::string& s1,
                                         const std::string& s2,
                                         double min_c, double max_c);
@@ -183,6 +188,11 @@ private:
     static inline thal_parameters tp_{};
     static inline thal_args       base_args_{};
     static inline bool            initialized_ = false;
+    static inline std::string dimer_cache_context_;
+    static inline std::string dimer_cache_directory_;
+    static inline std::shared_ptr<DimerInteractionCache> dimer_cache_;
+    static double calculate_dimer_worst_dg(const std::string& s1,
+        const std::string& s2, double min_c, double max_c);
     static inline std::mutex      call_mutex_;
 
     // Salt concentrations stored at init() for use in salt correction.
